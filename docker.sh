@@ -155,7 +155,7 @@ install_redis() {
     # 创建Redis配置文件
     cat > $REDIS_CONFIG << EOF
 port ${REDIS_PORT}
-bind 0.0.0.0
+bind 127.0.0.1
 dir /var/lib/redis
 daemonize yes
 pidfile /var/run/redis/redis-server.pid
