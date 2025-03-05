@@ -141,14 +141,27 @@ install_redis() {
 
     # 安装Redis
     if [ -f /etc/redhat-release ]; then
+        # RedHat/CentOS
         yum install -y epel-release redis >/dev/null 2>&1
+    elif [ -f /etc/alpine-release ]; then
+        # Alpine Linux
+        apk update >/dev/null 2>&1
+        apk add redis >/dev/null 2>&1
     else
+        # Debian/Ubuntu
         apt-get update >/dev/null 2>&1
         apt-get install -y redis-server >/dev/null 2>&1
     fi
 
     # 创建必要的目录
     mkdir -p /var/lib/redis /var/log/redis /var/run/redis
+
+    # Alpine 使用不同的用户组
+    if [ -f /etc/alpine-release ]; then
+        addgroup -S redis 2>/dev/null || true
+        adduser -S -G redis redis 2>/dev/null || true
+    fi
+
     chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis
     chmod 750 /var/lib/redis /var/log/redis /var/run/redis
 
@@ -166,9 +179,14 @@ EOF
     chown redis:redis $REDIS_CONFIG
     chmod 640 $REDIS_CONFIG
 
-    # 重启Redis服务
-    systemctl daemon-reload
-    systemctl restart redis-server.service
+    # 在 Alpine 中使用 OpenRC 而不是 systemd
+    if [ -f /etc/alpine-release ]; then
+        rc-update add redis default
+        rc-service redis restart
+    else
+        systemctl daemon-reload
+        systemctl restart redis-server.service
+    fi
     sleep 2
 
     # 验证Redis运行状态
@@ -189,7 +207,11 @@ EOF
         echo -e ""
     else
         log_error "Redis安装失败"
-        systemctl status redis-server.service
+        if [ -f /etc/alpine-release ]; then
+            rc-service redis status
+        else
+            systemctl status redis-server.service
+        fi
         return 1
     fi
 }
