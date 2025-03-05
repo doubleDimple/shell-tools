@@ -334,7 +334,7 @@ deploy_app() {
         $redis_env \
         --network host \
         --rm \
-        lovele/oci-start:latest; then
+        lovele/oci-start-test:latest; then
 
         log_success "Docker应用部署成功"
 
