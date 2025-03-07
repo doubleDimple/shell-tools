@@ -30,170 +30,60 @@ log_success() {
 JAR_PATH="/root/oci-start/oci-start-release.jar"
 LOG_FILE="/dev/null"
 JAR_DIR="$(dirname "$JAR_PATH")"
+DB_CONFIG_FILE="${JAR_DIR}/db_config.properties"
+APP_CONFIG_FILE="./data/application.yml"
 
 # JVM参数
 JVM_OPTS="-XX:+UseG1GC"
 
-# Redis默认配置
-REDIS_PORT="56689"
-REDIS_CONFIG="/etc/redis/redis.conf"
-REDIS_INFO_FILE="/etc/redis/redis_info"
+# 生成随机密码
+generate_db_password() {
+    # 生成一个16位的随机密码，包含大小写字母、数字和特殊字符
+    local chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+"
+    local length=16
+    local password=""
 
-# Redis配置检查函数
-check_redis_config() {
-    local redis_port=""
-    local redis_password=""
-    local password_enabled="false"
+    for (( i=0; i<length; i++ )); do
+        local rand=$((RANDOM % ${#chars}))
+        password+=${chars:$rand:1}
+    done
 
-    # 检查Redis是否已安装
-    if ! command -v redis-cli >/dev/null 2>&1; then
-        log_error "Redis未安装"
-        return 1
-    fi
+    echo "$password"
+}
 
-    # 获取Redis端口
-    local running_port=$(ps aux | grep redis-server | grep -v grep | awk '{print $12}' | cut -d':' -f2)
-    if [ -z "$running_port" ]; then
-        log_error "Redis未运行"
-        return 1
-    fi
+# 更新配置文件中的数据库密码
+update_db_password() {
+    local new_password=$(generate_db_password)
+    log_info "正在生成数据库密码..."
 
-    redis_port=$running_port
-    log_info "检测到Redis运行在端口 ${redis_port}"
+    # 保存密码到配置文件以便查询
+    mkdir -p "$(dirname "$DB_CONFIG_FILE")"
+    echo "DB_PASSWORD=${new_password}" > "$DB_CONFIG_FILE"
+    chmod 600 "$DB_CONFIG_FILE"
 
-    # 首先检查配置文件中是否设置了密码
-    if [ -f "/etc/redis/redis.conf" ]; then
-        local conf_password=$(grep "^requirepass" /etc/redis/redis.conf 2>/dev/null | awk '{print $2}')
-        if [ ! -z "$conf_password" ]; then
-            redis_password=$conf_password
-            password_enabled="true"
-            log_success "检测到Redis已配置密码认证"
-        else
-            log_info "Redis未配置密码认证"
+    # 更新应用配置文件
+    if [ -f "$APP_CONFIG_FILE" ]; then
+        log_info "更新应用配置文件中的密码..."
+        # 备份原配置文件
+        cp "$APP_CONFIG_FILE" "${APP_CONFIG_FILE}.bak"
+
+        # 使用sed直接替换环境变量引用为实际密码值
+        sed -i "s/password: .*$/password: $new_password/" "$APP_CONFIG_FILE"
+
+        if [ $? -ne 0 ]; then
+            log_error "更新配置文件失败，请检查配置文件权限"
+            return 1
         fi
+        log_success "配置文件已更新"
+    else
+        log_warn "应用配置文件不存在: $APP_CONFIG_FILE"
+        log_info "将在应用首次启动时自动创建"
     fi
 
-    # 设置环境变量
-    export SPRING_REDIS_HOST=localhost
-    export SPRING_REDIS_PORT=$redis_port
-    export SPRING_REDIS_PASSWORD_ENABLED=$password_enabled
-    if [ "$password_enabled" = "true" ]; then
-        export SPRING_REDIS_PASSWORD=$redis_password
-    fi
-
-    # 保存配置信息
-    mkdir -p "$(dirname "$REDIS_INFO_FILE")"
-    echo "REDIS_PORT=${redis_port}" > "$REDIS_INFO_FILE"
-    echo "REDIS_PASSWORD_ENABLED=${password_enabled}" >> "$REDIS_INFO_FILE"
-    if [ "$password_enabled" = "true" ]; then
-        echo "REDIS_PASSWORD=${redis_password}" >> "$REDIS_INFO_FILE"
-    fi
-    chmod 600 "$REDIS_INFO_FILE"
-
-    # 输出Redis配置信息
-    echo -e "\n${BLUE}Redis配置信息：${NC}"
-    echo -e "${CYAN}地址:${NC} localhost"
-    echo -e "${CYAN}端口:${NC} ${redis_port}"
-    echo -e "${CYAN}密码认证:${NC} $([ "$password_enabled" = "true" ] && echo "已启用" || echo "未启用")"
-    if [ "$password_enabled" = "true" ]; then
-        echo -e "${CYAN}密码:${NC} ${redis_password}"
-    fi
-    echo -e ""
-
+    log_success "数据库密码已生成并更新"
     return 0
 }
 
-# 安装Redis
-install_redis() {
-    log_info "开始安装Redis..."
-
-    # 安装Redis
-    if [ -f /etc/redhat-release ]; then
-        # RedHat/CentOS
-        yum install -y epel-release redis >/dev/null 2>&1
-    elif [ -f /etc/alpine-release ]; then
-        # Alpine Linux
-        apk update >/dev/null 2>&1
-        apk add redis >/dev/null 2>&1
-    else
-        # Debian/Ubuntu
-        apt-get update >/dev/null 2>&1
-        apt-get install -y redis-server >/dev/null 2>&1
-    fi
-
-    # 创建必要的目录
-    mkdir -p /var/lib/redis /var/log/redis /var/run/redis
-
-    # Alpine 使用不同的用户组
-    if [ -f /etc/alpine-release ]; then
-        addgroup -S redis 2>/dev/null || true
-        adduser -S -G redis redis 2>/dev/null || true
-    fi
-
-    chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis
-    chmod 750 /var/lib/redis /var/log/redis /var/run/redis
-
-    # 创建Redis配置文件
-    cat > $REDIS_CONFIG << EOF
-port ${REDIS_PORT}
-bind 127.0.0.1
-dir /var/lib/redis
-daemonize yes
-pidfile /var/run/redis/redis-server.pid
-logfile /var/log/redis/redis-server.log
-EOF
-
-    # 设置配置文件权限
-    chown redis:redis $REDIS_CONFIG
-    chmod 640 $REDIS_CONFIG
-
-    # 在 Alpine 中使用 OpenRC 而不是 systemd
-    if [ -f /etc/alpine-release ]; then
-        rc-update add redis default
-        rc-service redis restart
-    else
-        systemctl daemon-reload
-        systemctl restart redis-server.service
-    fi
-    sleep 2
-
-    # 验证Redis运行状态
-    if redis-cli -p ${REDIS_PORT} ping >/dev/null 2>&1; then
-        log_success "Redis安装成功并正在运行"
-        # 保存Redis配置信息
-        echo "REDIS_PORT=${REDIS_PORT}" > "$REDIS_INFO_FILE"
-        echo "REDIS_PASSWORD_ENABLED=false" >> "$REDIS_INFO_FILE"
-        chmod 600 "$REDIS_INFO_FILE"
-
-        # 导出环境变量
-        export SPRING_REDIS_HOST=localhost
-        export SPRING_REDIS_PORT=$REDIS_PORT
-        export SPRING_REDIS_PASSWORD_ENABLED=false
-
-        echo -e "\n${BLUE}Redis配置信息：${NC}"
-        echo -e "${CYAN}端口:${NC} ${REDIS_PORT}"
-        echo -e "${CYAN}密码认证:${NC} 未启用"
-        echo -e ""
-    else
-        log_error "Redis安装失败"
-        if [ -f /etc/alpine-release ]; then
-            rc-service redis status
-        else
-            systemctl status redis-server.service
-        fi
-        exit 1
-    fi
-}
-
-# 检查和配置Redis
-setup_redis() {
-    if check_redis_config; then
-        log_success "使用现有Redis配置"
-    else
-        log_info "准备安装新的Redis实例..."
-        install_redis
-    fi
-}
 # 检查并下载jar包
 check_and_download_jar() {
     if [ ! -f "$JAR_PATH" ]; then
@@ -211,8 +101,8 @@ start() {
     # 检查并下载jar包
     check_and_download_jar
 
-    # 检查和配置Redis
-    setup_redis
+    # 更新数据库密码
+    update_db_password
 
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_warn "应用已经在运行中"
@@ -235,9 +125,17 @@ start() {
             IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
         fi
 
-        # 输出访问地址和Redis信息
+        # 输出访问地址和数据库信息
         echo -e "${BLUE}欢迎使用oci-start${NC}"
         echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
+
+        # 显示数据库配置信息
+        if [ -f "$DB_CONFIG_FILE" ]; then
+            local db_password=$(grep "DB_PASSWORD" "$DB_CONFIG_FILE" | cut -d'=' -f2)
+            echo -e "\n${BLUE}数据库配置信息：${NC}"
+            echo -e "${CYAN}类型:${NC} H2内嵌数据库"
+            echo -e "${CYAN}当前密码:${NC} $db_password"
+        fi
 
     else
         log_error "应用启动失败"
@@ -269,24 +167,24 @@ restart() {
 status() {
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_success "应用正在运行"
-        if [ -f "$REDIS_INFO_FILE" ]; then
-            # 显示Redis配置信息
-            local redis_port=$(grep "REDIS_PORT" "$REDIS_INFO_FILE" | cut -d'=' -f2)
-            local redis_enabled=$(grep "REDIS_PASSWORD_ENABLED" "$REDIS_INFO_FILE" | cut -d'=' -f2)
 
-            echo -e "\n${BLUE}Redis配置：${NC}"
-            echo -e "${CYAN}地址:${NC} localhost"
-            echo -e "${CYAN}端口:${NC} ${redis_port}"
+        # 获取系统IP地址
+        IP=$(hostname -I | awk '{print $1}')
+        if [ -z "$IP" ]; then
+            IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+        fi
 
-            if [ "$redis_enabled" = "true" ]; then
-                local redis_password=$(grep "REDIS_PASSWORD" "$REDIS_INFO_FILE" | cut -d'=' -f2)
-                echo -e "${CYAN}密码认证:${NC} 已启用"
-                echo -e "${CYAN}密码:${NC} ${redis_password}"
-            else
-                echo -e "${CYAN}密码认证:${NC} 未启用"
-            fi
+        echo -e "\n${BLUE}应用信息：${NC}"
+        echo -e "${CYAN}访问地址:${NC} http://${IP}:9856"
+        echo -e "${CYAN}数据库:${NC} H2"
+
+        if [ -f "$DB_CONFIG_FILE" ]; then
+            # 从配置文件读取密码
+            local db_password=$(grep "DB_PASSWORD" "$DB_CONFIG_FILE" | cut -d'=' -f2)
+            echo -e "${CYAN}密码配置文件:${NC} $DB_CONFIG_FILE"
+            echo -e "${CYAN}当前密码:${NC} $db_password"
         else
-            log_warn "未找到Redis配置信息"
+            echo -e "${CYAN}密码配置:${NC} 未保存配置文件"
         fi
     else
         log_error "应用未运行"
@@ -341,15 +239,9 @@ update_latest() {
 }
 
 uninstall() {
-    # 保存现有Redis配置信息（如果需要的话）
-    if [ -f "$REDIS_INFO_FILE" ]; then
-        cp "$REDIS_INFO_FILE" "${REDIS_INFO_FILE}.backup"
-    fi
-
     echo -e "${YELLOW}确认卸载说明:${NC}"
     echo -e "1. 将停止并删除所有应用相关文件"
-    echo -e "2. Redis服务和配置将保留"
-    echo -e "3. 此操作不可逆，请确认"
+    echo -e "2. 此操作不可逆，请确认"
     echo -ne "${YELLOW}确认继续卸载吗? [y/N]: ${NC}"
     read -r response
 
@@ -374,6 +266,7 @@ uninstall() {
 
     # 删除应用文件
     [ -f "$JAR_PATH" ] && rm -f "$JAR_PATH"
+    [ -f "$DB_CONFIG_FILE" ] && rm -f "$DB_CONFIG_FILE"
 
     # 清理其他文件
     find "$JAR_DIR" -name "*.bak" -o -name "*.backup" -o -name "*.temp" -o -name "*.log" -delete 2>/dev/null
@@ -381,10 +274,6 @@ uninstall() {
     # 检查是否清理完成
     if [ ! -f "$JAR_PATH" ]; then
         log_success "应用卸载完成"
-        if [ -f "${REDIS_INFO_FILE}.backup" ]; then
-            mv "${REDIS_INFO_FILE}.backup" "$REDIS_INFO_FILE"
-            echo -e "${GREEN}Redis配置已保存，下次安装时将自动使用相同配置${NC}"
-        fi
         echo -e "${GREEN}如需重新安装应用，请使用 'start' 命令${NC}"
     else
         log_error "卸载未完全成功，请检查日志"
