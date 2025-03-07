@@ -11,23 +11,23 @@ NC='\033[0m' # No Color
 
 # 使用示例
 # 1. 默认安装（将安装到 /root/oci-start-docker 目录）：
-#    ./docker-test.sh install
+#    ./docker.sh install
 #
 # 2. 指定目录安装（三种方式）：
 #    a. 一次性指定：
-#       OCI_APP_DIR=/root/oci-start-docker ./docker-test.sh install
+#       OCI_APP_DIR=/root/oci-start-docker ./docker.sh install
 #
 #    b. 临时指定（仅对当前终端有效）：
 #       export OCI_APP_DIR=/root/oci-start-docker
-#       ./docker-test.sh install
+#       ./docker.sh install
 #
 #    c. 永久指定（对当前用户永久有效）：
 #       echo 'export OCI_APP_DIR=/root/oci-start-docker' >> ~/.bashrc
 #       source ~/.bashrc
-#       ./docker-test.sh install
+#       ./docker.sh install
 #
 # 3. 卸载应用：
-#    ./docker-test.sh uninstall
+#    ./docker.sh uninstall
 
 
 # 日志函数
@@ -50,8 +50,6 @@ log_success() {
 # 配置变量
 APP_DIR="${OCI_APP_DIR:-/root/oci-start-docker}"
 APP_CONTAINER_NAME="oci-start"
-DB_CONFIG_FILE="${APP_DIR}/db_config.properties"
-APP_CONFIG_FILE="${APP_DIR}/data/application.yml"
 
 # 添加路径检查函数
 check_script_path() {
@@ -66,58 +64,6 @@ check_script_path() {
     else
         log_info "使用配置的应用目录: $APP_DIR"
     fi
-
-    # 更新配置文件路径
-    DB_CONFIG_FILE="${APP_DIR}/db_config.properties"
-    APP_CONFIG_FILE="${APP_DIR}/data/application.yml"
-}
-
-# 生成随机密码
-generate_db_password() {
-    # 生成一个16位的随机密码，包含大小写字母、数字和特殊字符
-    local chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+"
-    local length=16
-    local password=""
-
-    for (( i=0; i<length; i++ )); do
-        local rand=$((RANDOM % ${#chars}))
-        password+=${chars:$rand:1}
-    done
-
-    echo "$password"
-}
-
-# 更新配置文件中的数据库密码
-update_db_password() {
-    local new_password=$(generate_db_password)
-    log_info "正在生成数据库密码..."
-
-    # 保存密码到配置文件以便查询
-    mkdir -p "$(dirname "$DB_CONFIG_FILE")"
-    echo "DB_PASSWORD=${new_password}" > "$DB_CONFIG_FILE"
-    chmod 600 "$DB_CONFIG_FILE"
-
-    # 更新应用配置文件
-    if [ -f "$APP_CONFIG_FILE" ]; then
-        log_info "更新应用配置文件中的密码..."
-        # 备份原配置文件
-        cp "$APP_CONFIG_FILE" "${APP_CONFIG_FILE}.bak"
-
-        # 使用sed直接替换环境变量引用为实际密码值
-        sed -i "s/password: .*$/password: $new_password/" "$APP_CONFIG_FILE"
-
-        if [ $? -ne 0 ]; then
-            log_error "更新配置文件失败，请检查配置文件权限"
-            return 1
-        fi
-        log_success "配置文件已更新"
-    else
-        log_warn "应用配置文件不存在: $APP_CONFIG_FILE"
-        log_info "将在应用首次启动时创建，然后手动更新密码"
-    fi
-
-    log_success "数据库密码已生成并保存"
-    echo "$new_password"
 }
 
 # 创建应用目录结构
@@ -196,9 +142,6 @@ deploy_app() {
         sleep 2
     fi
 
-    # 生成新密码并更新配置文件
-    local db_password=$(update_db_password)
-
     # 检查并拉取最新镜像
     log_info "拉取最新镜像..."
     if ! docker pull lovele/oci-start-test:latest; then
@@ -213,7 +156,7 @@ deploy_app() {
         -p 9856:9856 \
         -v "$APP_DIR/data:/oci-start/data" \
         -v "$APP_DIR/logs:/oci-start/logs" \
-        -v "$APP_DIR/docker-test.sh:/oci-start/docker-test.sh" \
+        -v "$APP_DIR/docker.sh:/oci-start/docker.sh" \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v /usr/bin/docker:/usr/bin/docker \
         -e SERVER_PORT=9856 \
@@ -246,15 +189,6 @@ deploy_app() {
         echo -e "${BLUE}欢迎使用oci-start${NC}"
         echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
 
-        # 显示数据库配置信息
-        if [ -f "$DB_CONFIG_FILE" ]; then
-            local db_password=$(grep "DB_PASSWORD" "$DB_CONFIG_FILE" | cut -d'=' -f2)
-            echo -e "\n${BLUE}数据库配置信息：${NC}"
-            echo -e "${CYAN}类型:${NC} H2 (内嵌数据库)"
-            echo -e "${CYAN}密码状态:${NC} 已动态生成并写入配置文件"
-            echo -e "${CYAN}当前密码:${NC} $db_password"
-        fi
-
         # 显示容器日志
         echo -e "\n${YELLOW}容器启动日志:${NC}"
         docker logs --tail 10 "$APP_CONTAINER_NAME"
@@ -267,6 +201,7 @@ deploy_app() {
 
 # 卸载函数
 uninstall() {
+    local app_dir="/root/oci-start-docker"
     local container_name="oci-start"
 
     # 显示确认提示
@@ -274,7 +209,7 @@ uninstall() {
     echo -e "即将执行以下操作:"
     echo -e "1. 停止并删除 Docker 容器"
     echo -e "2. 删除 Docker 镜像"
-    echo -e "3. 保留数据目录: ${APP_DIR}/data"
+    echo -e "3. 保留数据目录: ${app_dir}/data"
     echo -e "\n${RED}注意: 此操作无法撤销${NC}"
     echo -ne "\n${YELLOW}是否继续? [y/N]: ${NC}"
 
@@ -301,13 +236,13 @@ uninstall() {
     fi
 
     # 处理应用数据
-    if [ -d "${APP_DIR}" ]; then
+    if [ -d "${app_dir}" ]; then
         log_info "处理应用目录..."
         # 保护数据目录
-        if [ -d "${APP_DIR}/data" ]; then
+        if [ -d "${app_dir}/data" ]; then
             log_info "保护数据目录..."
             local temp_data_dir="/tmp/oci-start-data-backup"
-            mv "${APP_DIR}/data" "${temp_data_dir}"
+            mv "${app_dir}/data" "${temp_data_dir}"
 
             if [ $? -ne 0 ]; then
                 log_error "备份数据目录失败"
@@ -316,29 +251,29 @@ uninstall() {
         fi
 
         # 删除应用目录
-        log_info "删除应用目录: ${APP_DIR}"
-        rm -rf "${APP_DIR}"
+        log_info "删除应用目录: ${app_dir}"
+        rm -rf "${app_dir}"
 
         # 恢复数据目录
         if [ -d "${temp_data_dir}" ]; then
             log_info "恢复数据目录..."
-            mkdir -p "${APP_DIR}"
-            mv "${temp_data_dir}" "${APP_DIR}/data"
+            mkdir -p "${app_dir}"
+            mv "${temp_data_dir}" "${app_dir}/data"
             if [ $? -eq 0 ]; then
-                log_success "数据目录已恢复到: ${APP_DIR}/data"
+                log_success "数据目录已恢复到: ${app_dir}/data"
             else
                 log_error "恢复数据目录失败，备份在: ${temp_data_dir}"
                 return 1
             fi
         fi
     else
-        log_warn "应用目录不存在: ${APP_DIR}"
+        log_warn "应用目录不存在: ${app_dir}"
     fi
 
     # 清理Docker镜像
     log_info "清理Docker镜像..."
-    if docker images | grep -q "lovele/oci-start-test"; then
-        docker rmi "$(docker images lovele/oci-start-test -q)" >/dev/null 2>&1
+    if docker images | grep -q "lovele/oci-start"; then
+        docker rmi "$(docker images lovele/oci-start -q)" >/dev/null 2>&1
         if [ $? -eq 0 ]; then
             log_success "Docker镜像已删除"
         else
@@ -351,9 +286,9 @@ uninstall() {
     log_success "==========================="
     log_success "应用卸载已完成!"
     echo -e "\n${GREEN}保留的内容:${NC}"
-    echo -e "1. 应用数据目录: ${APP_DIR}/data"
+    echo -e "1. 应用数据目录: ${app_dir}/data"
     echo -e "\n${YELLOW}如需重新安装应用，请使用:${NC}"
-    echo -e "   ./docker-test.sh install\n"
+    echo -e "   ./docker.sh install\n"
 }
 
 # 检查Docker是否已安装
@@ -389,20 +324,24 @@ update() {
 
     log_success "Docker镜像更新成功!"
 
-    # 停止现有容器
-    log_info "停止现有容器..."
-    if ! remove_container "$APP_CONTAINER_NAME"; then
-        log_error "停止现有容器失败"
-        return 1
-    fi
+    # 重启容器
+    log_info "重启容器使用新镜像..."
+    if docker restart "$APP_CONTAINER_NAME"; then
+        log_success "容器重启成功！"
 
-    # 重新部署应用
-    log_info "使用新镜像重新部署应用..."
-    if deploy_app; then
-        log_success "应用更新成功！"
-        return 0
+        # 等待容器启动
+        sleep 5
+
+        # 验证容器运行状态
+        if docker ps | grep -q "$APP_CONTAINER_NAME"; then
+            log_success "容器已成功重启并运行"
+            return 0
+        else
+            log_error "容器重启后未能正常运行"
+            return 1
+        fi
     else
-        log_error "应用更新失败"
+        log_error "容器重启失败"
         return 1
     fi
 }

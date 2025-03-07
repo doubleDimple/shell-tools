@@ -30,59 +30,9 @@ log_success() {
 JAR_PATH="/root/oci-start/oci-start-release.jar"
 LOG_FILE="/dev/null"
 JAR_DIR="$(dirname "$JAR_PATH")"
-DB_CONFIG_FILE="${JAR_DIR}/db_config.properties"
-APP_CONFIG_FILE="./data/application.yml"
 
 # JVM参数
 JVM_OPTS="-XX:+UseG1GC"
-
-# 生成随机密码
-generate_db_password() {
-    # 生成一个16位的随机密码，包含大小写字母、数字和特殊字符
-    local chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+"
-    local length=16
-    local password=""
-
-    for (( i=0; i<length; i++ )); do
-        local rand=$((RANDOM % ${#chars}))
-        password+=${chars:$rand:1}
-    done
-
-    echo "$password"
-}
-
-# 更新配置文件中的数据库密码
-update_db_password() {
-    local new_password=$(generate_db_password)
-    log_info "正在生成数据库密码..."
-
-    # 保存密码到配置文件以便查询
-    mkdir -p "$(dirname "$DB_CONFIG_FILE")"
-    echo "DB_PASSWORD=${new_password}" > "$DB_CONFIG_FILE"
-    chmod 600 "$DB_CONFIG_FILE"
-
-    # 更新应用配置文件
-    if [ -f "$APP_CONFIG_FILE" ]; then
-        log_info "更新应用配置文件中的密码..."
-        # 备份原配置文件
-        cp "$APP_CONFIG_FILE" "${APP_CONFIG_FILE}.bak"
-
-        # 使用sed直接替换环境变量引用为实际密码值
-        sed -i "s/password: .*$/password: $new_password/" "$APP_CONFIG_FILE"
-
-        if [ $? -ne 0 ]; then
-            log_error "更新配置文件失败，请检查配置文件权限"
-            return 1
-        fi
-        log_success "配置文件已更新"
-    else
-        log_warn "应用配置文件不存在: $APP_CONFIG_FILE"
-        log_info "将在应用首次启动时自动创建"
-    fi
-
-    log_success "数据库密码已生成并更新"
-    return 0
-}
 
 # 检查并下载jar包
 check_and_download_jar() {
@@ -100,9 +50,6 @@ check_and_download_jar() {
 start() {
     # 检查并下载jar包
     check_and_download_jar
-
-    # 更新数据库密码
-    update_db_password
 
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_warn "应用已经在运行中"
@@ -125,17 +72,9 @@ start() {
             IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
         fi
 
-        # 输出访问地址和数据库信息
+        # 输出访问地址
         echo -e "${BLUE}欢迎使用oci-start${NC}"
         echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
-
-        # 显示数据库配置信息
-        if [ -f "$DB_CONFIG_FILE" ]; then
-            local db_password=$(grep "DB_PASSWORD" "$DB_CONFIG_FILE" | cut -d'=' -f2)
-            echo -e "\n${BLUE}数据库配置信息：${NC}"
-            echo -e "${CYAN}类型:${NC} H2内嵌数据库"
-            echo -e "${CYAN}当前密码:${NC} $db_password"
-        fi
 
     else
         log_error "应用启动失败"
@@ -167,25 +106,6 @@ restart() {
 status() {
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_success "应用正在运行"
-
-        # 获取系统IP地址
-        IP=$(hostname -I | awk '{print $1}')
-        if [ -z "$IP" ]; then
-            IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
-        fi
-
-        echo -e "\n${BLUE}应用信息：${NC}"
-        echo -e "${CYAN}访问地址:${NC} http://${IP}:9856"
-        echo -e "${CYAN}数据库:${NC} H2"
-
-        if [ -f "$DB_CONFIG_FILE" ]; then
-            # 从配置文件读取密码
-            local db_password=$(grep "DB_PASSWORD" "$DB_CONFIG_FILE" | cut -d'=' -f2)
-            echo -e "${CYAN}密码配置文件:${NC} $DB_CONFIG_FILE"
-            echo -e "${CYAN}当前密码:${NC} $db_password"
-        else
-            echo -e "${CYAN}密码配置:${NC} 未保存配置文件"
-        fi
     else
         log_error "应用未运行"
     fi
@@ -266,7 +186,6 @@ uninstall() {
 
     # 删除应用文件
     [ -f "$JAR_PATH" ] && rm -f "$JAR_PATH"
-    [ -f "$DB_CONFIG_FILE" ] && rm -f "$DB_CONFIG_FILE"
 
     # 清理其他文件
     find "$JAR_DIR" -name "*.bak" -o -name "*.backup" -o -name "*.temp" -o -name "*.log" -delete 2>/dev/null
