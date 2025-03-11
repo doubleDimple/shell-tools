@@ -3,4 +3,5 @@ sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-
 
 
 
-docker 一键安装脚本： apt update -y && apt install -y curl && curl -fsSL https://get.docker.com | bash -s docker
+docker 一键安装脚本： 
+apt update -y && apt install -y curl && curl -fsSL https://get.docker.com | bash -s docker
