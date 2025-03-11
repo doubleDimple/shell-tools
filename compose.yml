@@ -1,0 +1,15 @@
+version: '3.3'
+services:
+  oci-start:
+    pull_policy: always
+    container_name: oci-start
+    ports:
+      - 9856:9856
+    volumes:
+      - ./data:/oci-start/data
+      - ./logs:/oci-start/logs
+    environment:
+      - SERVER_PORT=9856
+      - DATA_PATH=/oci-start/data
+      - LOG_HOME=/oci-start/logs
+    image: lovele/oci-start:latest
