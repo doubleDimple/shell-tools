@@ -164,7 +164,7 @@ deploy_app() {
         -e DATA_PATH=/oci-start/data \
         -e LOG_HOME=/oci-start/logs \
         --network host \
-        --rm \
+        --restart always \
         lovele/oci-start:latest; then
 
         log_success "Docker应用部署成功"
