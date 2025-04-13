@@ -30,9 +30,75 @@ log_success() {
 JAR_PATH="/root/oci-start/oci-start-release.jar"
 LOG_FILE="/dev/null"
 JAR_DIR="$(dirname "$JAR_PATH")"
+SCRIPT_PATH=$(realpath "$0")
+SYMLINK_PATH="/usr/local/bin/oci-start"
 
 # JVM参数
 JVM_OPTS="-XX:+UseG1GC"
+
+# 检查Java是否已安装
+check_java() {
+    if ! command -v java &> /dev/null; then
+        log_warn "未检测到Java，准备安装JDK..."
+        install_java
+    else
+        java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}')
+        log_info "检测到Java版本: $java_version"
+    fi
+}
+
+# 安装Java
+install_java() {
+    log_info "开始安装Java..."
+    if command -v apt &> /dev/null; then
+        # Debian/Ubuntu
+        log_info "使用apt安装JDK..."
+        apt update -y
+        DEBIAN_FRONTEND=noninteractive apt install -y default-jdk
+    elif command -v yum &> /dev/null; then
+        # CentOS/RHEL
+        log_info "使用yum安装JDK..."
+        yum update -y
+        yum install -y java-11-openjdk
+    elif command -v dnf &> /dev/null; then
+        # Fedora
+        log_info "使用dnf安装JDK..."
+        dnf update -y
+        dnf install -y java-11-openjdk
+    else
+        log_error "不支持的操作系统，请手动安装Java"
+        exit 1
+    fi
+
+    if ! command -v java &> /dev/null; then
+        log_error "Java安装失败"
+        exit 1
+    else
+        java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}')
+        log_success "Java安装成功，版本: $java_version"
+    fi
+}
+
+# 创建软链接
+create_symlink() {
+    if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
+        log_info "创建软链接: $SYMLINK_PATH -> $SCRIPT_PATH"
+        # 确保目标目录存在
+        mkdir -p "$(dirname "$SYMLINK_PATH")" 2>/dev/null
+        # 尝试创建软链接，如果没有权限则提示使用sudo
+        if ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
+            log_success "软链接创建成功，现在可以使用 'oci-start' 命令"
+        else
+            log_warn "没有权限创建软链接，尝试使用sudo"
+            if command -v sudo &>/dev/null; then
+                sudo ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH"
+                log_success "软链接创建成功，现在可以使用 'oci-quick' 命令"
+            else
+                log_error "创建软链接失败，请确保有足够权限或手动创建"
+            fi
+        fi
+    fi
+}
 
 # 检查并下载jar包
 check_and_download_jar() {
@@ -48,8 +114,17 @@ check_and_download_jar() {
 }
 
 start() {
+    # 检查Java安装，自动安装JDK
+    check_java
+    
     # 检查并下载jar包
     check_and_download_jar
+    
+    # 创建软链接
+    create_symlink
+    
+    # 输出成功提示
+    log_success "环境准备完成，现在可以使用 'oci-start' 命令"
 
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_warn "应用已经在运行中"
@@ -83,6 +158,9 @@ start() {
 }
 
 stop() {
+    # 创建软链接，确保停止后仍然可以使用oci-start命令
+    create_symlink
+    
     PIDS=$(pgrep -f "$JAR_PATH")
     if [ -z "$PIDS" ]; then
         log_warn "应用未在运行"
@@ -99,11 +177,18 @@ stop() {
 }
 
 restart() {
+    # 重启时也检查环境
+    check_java
+    create_symlink
     stop
     start
 }
 
 status() {
+    # 在所有命令中都增加环境检查
+    check_java
+    create_symlink
+    
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_success "应用正在运行"
     else
@@ -112,9 +197,29 @@ status() {
 }
 
 update_latest() {
+    # 检查Java安装
+    check_java
+    
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
     local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+    
+    # 检查是否安装了curl
+    if ! command -v curl &> /dev/null; then
+        log_info "安装curl..."
+        if command -v apt &> /dev/null; then
+            apt update -y
+            apt install -y curl
+        elif command -v yum &> /dev/null; then
+            yum install -y curl
+        elif command -v dnf &> /dev/null; then
+            dnf install -y curl
+        else
+            log_error "不支持的操作系统，请手动安装curl"
+            exit 1
+        fi
+    fi
+    
     local download_url=$(curl -s "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
 
     if [ -z "$download_url" ]; then
@@ -190,14 +295,22 @@ uninstall() {
     # 清理其他文件
     find "$JAR_DIR" -name "*.bak" -o -name "*.backup" -o -name "*.temp" -o -name "*.log" -delete 2>/dev/null
 
+    # 删除软链接
+    if [ -L "$SYMLINK_PATH" ]; then
+        log_info "正在删除软链接..."
+        rm -f "$SYMLINK_PATH"
+    fi
+
     # 检查是否清理完成
-    if [ ! -f "$JAR_PATH" ]; then
+    if [ ! -f "$JAR_PATH" ] && [ ! -L "$SYMLINK_PATH" ]; then
         log_success "应用卸载完成"
         echo -e "${GREEN}如需重新安装应用，请使用 'start' 命令${NC}"
     else
         log_error "卸载未完全成功，请检查日志"
     fi
 }
+
+# 移除独立的setup函数，在其他命令中集成这些功能
 
 # 主命令处理
 case "$1" in
