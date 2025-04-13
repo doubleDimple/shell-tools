@@ -26,11 +26,14 @@ log_success() {
     echo -e "${CYAN}[SUCCESS]${NC} $1"
 }
 
-# 应用配置
+# 获取脚本的实际路径(无论从哪里调用)
+SCRIPT_REAL_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+
+# 应用配置 - 使用绝对路径
 JAR_PATH="/root/oci-start/oci-start-release.jar"
 LOG_FILE="/dev/null"
 JAR_DIR="$(dirname "$JAR_PATH")"
-SCRIPT_PATH=$(realpath "$0")
+SCRIPT_PATH=$(readlink -f "$0")
 SYMLINK_PATH="/usr/local/bin/oci-start"
 
 # JVM参数
@@ -92,7 +95,7 @@ create_symlink() {
             log_warn "没有权限创建软链接，尝试使用sudo"
             if command -v sudo &>/dev/null; then
                 sudo ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH"
-                log_success "软链接创建成功，现在可以使用 'oci-quick' 命令"
+                log_success "软链接创建成功，现在可以使用 'oci-start' 命令"
             else
                 log_error "创建软链接失败，请确保有足够权限或手动创建"
             fi
@@ -102,6 +105,7 @@ create_symlink() {
 
 # 检查并下载jar包
 check_and_download_jar() {
+    # 始终使用绝对路径操作
     if [ ! -f "$JAR_PATH" ]; then
         log_info "未找到JAR包，准备下载最新版本..."
         mkdir -p "$(dirname "$JAR_PATH")"
@@ -114,6 +118,12 @@ check_and_download_jar() {
 }
 
 start() {
+    # 切换到脚本所在目录，确保所有操作基于此目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     # 检查Java安装，自动安装JDK
     check_java
     
@@ -133,8 +143,8 @@ start() {
 
     log_info "正在启动应用..."
 
-    # 启动应用
-    nohup java $JVM_OPTS -jar $JAR_PATH > $LOG_FILE 2>&1 &
+    # 启动应用 - 使用绝对路径
+    nohup java $JVM_OPTS -jar "$JAR_PATH" > "$LOG_FILE" 2>&1 &
 
     # 等待几秒检查是否成功启动
     sleep 3
@@ -158,6 +168,12 @@ start() {
 }
 
 stop() {
+    # 切换到脚本所在目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     # 创建软链接，确保停止后仍然可以使用oci-start命令
     create_symlink
     
@@ -177,6 +193,12 @@ stop() {
 }
 
 restart() {
+    # 切换到脚本所在目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     # 重启时也检查环境
     check_java
     create_symlink
@@ -185,6 +207,12 @@ restart() {
 }
 
 status() {
+    # 切换到脚本所在目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     # 在所有命令中都增加环境检查
     check_java
     create_symlink
@@ -197,6 +225,12 @@ status() {
 }
 
 update_latest() {
+    # 切换到脚本所在目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     # 检查Java安装
     check_java
     
@@ -264,6 +298,12 @@ update_latest() {
 }
 
 uninstall() {
+    # 切换到脚本所在目录
+    cd "$SCRIPT_REAL_DIR" || {
+        log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
+        exit 1
+    }
+    
     echo -e "${YELLOW}确认卸载说明:${NC}"
     echo -e "1. 将停止并删除所有应用相关文件"
     echo -e "2. 此操作不可逆，请确认"
@@ -309,8 +349,6 @@ uninstall() {
         log_error "卸载未完全成功，请检查日志"
     fi
 }
-
-# 移除独立的setup函数，在其他命令中集成这些功能
 
 # 主命令处理
 case "$1" in
