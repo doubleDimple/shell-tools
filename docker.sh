@@ -50,6 +50,77 @@ log_success() {
 # 配置变量
 APP_DIR="${OCI_APP_DIR:-/root/oci-start-docker}"
 APP_CONTAINER_NAME="oci-start"
+SCRIPT_PATH=$(realpath "$0")
+SYMLINK_PATH="/usr/local/bin/oci-start-docker"
+
+# 创建软链接
+create_symlink() {
+    if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
+        log_info "创建软链接: $SYMLINK_PATH -> $SCRIPT_PATH"
+        # 确保目标目录存在
+        mkdir -p "$(dirname "$SYMLINK_PATH")" 2>/dev/null
+        # 尝试创建软链接，如果没有权限则提示使用sudo
+        if ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
+            log_success "软链接创建成功，现在可以使用 'oci-start-docker' 命令"
+        else
+            log_warn "没有权限创建软链接，尝试使用sudo"
+            if command -v sudo &>/dev/null; then
+                sudo ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH"
+                log_success "软链接创建成功，现在可以使用 'oci-start-docker' 命令"
+            else
+                log_error "创建软链接失败，请确保有足够权限或手动创建"
+            fi
+        fi
+    fi
+}
+
+# 安装Docker
+install_docker() {
+    log_info "检查Docker是否已安装..."
+    if command -v docker &> /dev/null; then
+        if docker info &> /dev/null; then
+            log_success "Docker已安装并正常运行"
+            return 0
+        else
+            log_warn "Docker已安装但服务未运行，尝试启动服务..."
+            systemctl start docker &> /dev/null || service docker start &> /dev/null
+            if docker info &> /dev/null; then
+                log_success "Docker服务已成功启动"
+                return 0
+            else
+                log_error "无法启动Docker服务，尝试重新安装"
+            fi
+        fi
+    fi
+
+    log_info "开始安装Docker..."
+    log_info "正在更新系统包..."
+    apt update -y || { log_error "系统更新失败"; return 1; }
+    
+    log_info "正在安装curl..."
+    apt install -y curl || { log_error "安装curl失败"; return 1; }
+    
+    log_info "正在下载并安装Docker..."
+    curl -fsSL https://get.docker.com | bash -s docker
+    
+    if [ $? -ne 0 ]; then
+        log_error "Docker安装失败"
+        return 1
+    fi
+    
+    # 启动Docker服务
+    log_info "启动Docker服务..."
+    systemctl start docker &> /dev/null || service docker start &> /dev/null
+    
+    # 验证安装
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        log_success "Docker安装成功并已启动服务"
+        return 0
+    else
+        log_error "Docker安装完成但服务未能正常启动"
+        return 1
+    fi
+}
 
 # 添加路径检查函数
 check_script_path() {
@@ -201,8 +272,8 @@ deploy_app() {
 
 # 卸载函数
 uninstall() {
-    local app_dir="/root/oci-start-docker"
-    local container_name="oci-start"
+    local app_dir="${APP_DIR}"
+    local container_name="$APP_CONTAINER_NAME"
 
     # 显示确认提示
     echo -e "${YELLOW}===== 卸载确认 =====${NC}"
@@ -283,6 +354,13 @@ uninstall() {
         log_info "未发现相关Docker镜像"
     fi
 
+    # 删除软链接
+    if [ -L "$SYMLINK_PATH" ] && [ "$(readlink "$SYMLINK_PATH")" = "$SCRIPT_PATH" ]; then
+        log_info "删除软链接: $SYMLINK_PATH"
+        rm -f "$SYMLINK_PATH"
+        log_success "软链接已删除"
+    fi
+
     log_success "==========================="
     log_success "应用卸载已完成!"
     echo -e "\n${GREEN}保留的内容:${NC}"
@@ -293,26 +371,36 @@ uninstall() {
 
 # 检查Docker是否已安装
 check_docker() {
+    # 首先检查Docker是否已安装
     if ! command -v docker &> /dev/null; then
-        log_error "Docker未安装，请先安装Docker"
-        return 1
+        log_warn "Docker未安装，准备自动安装..."
+        install_docker
+        return $?
     fi
 
-    # 在容器内，我们只需要检查 docker 命令是否可用，不需要检查服务
+    # 检查Docker服务是否运行
     if docker info >/dev/null 2>&1; then
-        log_success "Docker可用"
+        log_success "Docker服务运行正常"
         return 0
     else
-        log_error "Docker守护进程无响应，请检查Docker Socket挂载"
-        return 1
+        log_warn "Docker已安装但服务未运行，尝试启动服务..."
+        systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1
+        
+        if docker info >/dev/null 2>&1; then
+            log_success "Docker服务已成功启动"
+            return 0
+        else
+            log_error "无法启动Docker服务，请检查Docker安装"
+            return 1
+        fi
     fi
-
-    log_success "Docker服务运行正常"
-    return 0
 }
 
 # 更新函数 - 拉取最新镜像并重启容器
 update() {
+    # 确保软链接存在
+    create_symlink
+    
     log_info "开始更新Docker镜像..."
 
     # 检查并拉取最新镜像
@@ -358,6 +446,9 @@ show_help() {
 main() {
     # 首先检查和设置路径
     check_script_path
+    
+    # 确保是最新路径
+    SCRIPT_PATH=$(realpath "$0")
 
     # 检查Docker安装状态
     if ! check_docker; then
@@ -366,6 +457,9 @@ main() {
 
     case "$1" in
         "install")
+            # 创建软链接
+            create_symlink
+            
             # 创建应用目录结构
             create_app_structure
 
@@ -374,6 +468,7 @@ main() {
 
             if [ $? -eq 0 ]; then
                 log_success "全部部署完成！"
+                echo -e "${GREEN}现在可以使用 'oci-start-docker' 命令来管理应用${NC}"
             else
                 log_error "部署过程中出现错误，请检查以上日志"
                 exit 1
