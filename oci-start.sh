@@ -224,6 +224,7 @@ status() {
     fi
 }
 
+# 修复更新函数 - 确保原子性操作和自动重启
 update_latest() {
     # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
@@ -268,26 +269,67 @@ update_latest() {
     local temp_file="${JAR_PATH}.temp"
     local backup_file="${JAR_PATH}.${latest_version}.bak"
 
+    # 下载新版本到临时文件
     if curl -L -o "$temp_file" "$download_url"; then
-        stop
+        # 验证下载的文件是否是有效的JAR文件
+        if ! file "$temp_file" | grep -q "Java archive"; then
+            log_error "下载的文件不是有效的JAR文件"
+            rm -f "$temp_file"
+            return 1
+        fi
+        
+        log_info "文件下载成功，开始更新..."
+        
+        # 停止应用
+        local was_running=false
+        if pgrep -f "$JAR_PATH" > /dev/null; then
+            was_running=true
+            log_info "停止当前运行的应用..."
+            stop
+            # 等待进程完全停止
+            sleep 3
+        fi
+        
+        # 备份原文件（如果存在）
         if [ -f "$JAR_PATH" ]; then
             mv "$JAR_PATH" "$backup_file"
             log_info "原JAR包已备份为: $backup_file"
         fi
 
-        mv "$temp_file" "$JAR_PATH"
-        chmod +x "$JAR_PATH"
-
-        log_success "更新完成，版本：${latest_version}"
-        start
-
-        sleep 5
-        if pgrep -f "$JAR_PATH" > /dev/null; then
-            log_success "新版本启动成功，清理备份文件..."
-            rm -f "$backup_file"
+        # 使用原子操作替换文件
+        if mv "$temp_file" "$JAR_PATH"; then
+            chmod +x "$JAR_PATH"
+            log_success "JAR包更新完成，版本：${latest_version}"
+            
+            # 如果之前在运行，则重新启动
+            if [ "$was_running" = true ]; then
+                log_info "重新启动应用..."
+                start
+                
+                # 验证启动是否成功
+                sleep 5
+                if pgrep -f "$JAR_PATH" > /dev/null; then
+                    log_success "新版本启动成功，清理备份文件..."
+                    rm -f "$backup_file"
+                    return 0
+                else
+                    log_error "新版本启动失败，恢复备份文件"
+                    if [ -f "$backup_file" ]; then
+                        mv "$backup_file" "$JAR_PATH"
+                        log_info "已恢复到备份版本"
+                        start
+                    fi
+                    return 1
+                fi
+            else
+                # 如果之前没有运行，清理备份文件
+                rm -f "$backup_file"
+                log_success "更新完成"
+                return 0
+            fi
         else
-            log_error "新版本启动失败，保留备份文件"
-            log_info "备份文件位置: $backup_file"
+            log_error "文件替换失败"
+            rm -f "$temp_file"
             return 1
         fi
     else
