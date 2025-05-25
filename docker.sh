@@ -8,7 +8,6 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-
 # 使用示例
 # 1. 默认安装（将安装到 /root/oci-start-docker 目录）：
 #    ./docker.sh install
@@ -28,7 +27,6 @@ NC='\033[0m' # No Color
 #
 # 3. 卸载应用：
 #    ./docker.sh uninstall
-
 
 # 日志函数
 log_info() {
@@ -396,40 +394,103 @@ check_docker() {
     fi
 }
 
-# 更新函数 - 拉取最新镜像并重启容器
+# 修复更新函数 - 拉取最新镜像并重新创建容器
 update() {
     # 确保软链接存在
     create_symlink
     
-    log_info "开始更新Docker镜像..."
+    log_info "开始更新Docker应用..."
 
-    # 检查并拉取最新镜像
+    # 检查容器是否存在
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^${APP_CONTAINER_NAME}$"; then
+        log_error "未找到容器 ${APP_CONTAINER_NAME}，请先安装应用"
+        return 1
+    fi
+
+    # 获取当前镜像ID
+    local old_image_id=$(docker inspect "$APP_CONTAINER_NAME" --format='{{.Image}}' 2>/dev/null)
+    log_info "当前镜像ID: $old_image_id"
+
+    # 拉取最新镜像
     log_info "拉取最新镜像..."
     if ! docker pull lovele/oci-start:latest; then
         log_error "拉取镜像失败"
         return 1
     fi
 
-    log_success "Docker镜像更新成功!"
+    # 获取新镜像ID
+    local new_image_id=$(docker images lovele/oci-start:latest --format='{{.ID}}' | head -n1)
+    log_info "新镜像ID: $new_image_id"
 
-    # 重启容器
-    log_info "重启容器使用新镜像..."
-    if docker restart "$APP_CONTAINER_NAME"; then
-        log_success "容器重启成功！"
+    # 检查镜像是否有更新
+    if [ "$old_image_id" = "$new_image_id" ]; then
+        log_info "镜像已是最新版本，无需更新"
+        return 0
+    fi
+
+    log_info "检测到新版本，开始更新容器..."
+
+    # 停止并删除旧容器
+    log_info "停止并删除旧容器..."
+    if ! remove_container "$APP_CONTAINER_NAME"; then
+        log_error "删除旧容器失败"
+        return 1
+    fi
+
+    # 等待容器完全删除
+    sleep 3
+
+    # 使用新镜像重新创建容器
+    log_info "使用新镜像创建容器..."
+    if docker run -d \
+        --name "$APP_CONTAINER_NAME" \
+        -p 9856:9856 \
+        -v "$APP_DIR/data:/oci-start/data" \
+        -v "$APP_DIR/logs:/oci-start/logs" \
+        -v "$APP_DIR/docker.sh:/oci-start/docker.sh" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /usr/bin/docker:/usr/bin/docker \
+        -e SERVER_PORT=9856 \
+        -e OCI_APP_DIR=/oci-start \
+        -e DATA_PATH=/oci-start/data \
+        -e LOG_HOME=/oci-start/logs \
+        --network host \
+        --restart always \
+        lovele/oci-start:latest; then
+
+        log_success "容器创建成功"
 
         # 等待容器启动
         sleep 5
 
         # 验证容器运行状态
         if docker ps | grep -q "$APP_CONTAINER_NAME"; then
-            log_success "容器已成功重启并运行"
+            log_success "Docker应用更新完成并已成功启动！"
+            
+            # 清理旧镜像（如果存在且不同于新镜像）
+            if [ -n "$old_image_id" ] && [ "$old_image_id" != "$new_image_id" ]; then
+                log_info "清理旧镜像..."
+                docker rmi "$old_image_id" >/dev/null 2>&1 || true
+            fi
+            
+            # 获取系统IP
+            IP=$(hostname -I | awk '{print $1}')
+            if [ -z "$IP" ]; then
+                IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+            fi
+
+            # 显示访问信息
+            echo -e "${BLUE}应用已更新完成${NC}"
+            echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
+            
             return 0
         else
-            log_error "容器重启后未能正常运行"
+            log_error "容器创建后未能正常运行"
+            docker logs "$APP_CONTAINER_NAME"
             return 1
         fi
     else
-        log_error "容器重启失败"
+        log_error "创建新容器失败"
         return 1
     fi
 }
@@ -439,7 +500,7 @@ show_help() {
     echo -e "${YELLOW}使用方法:${NC}"
     echo -e "  $0 ${GREEN}install${NC}    安装并部署应用"
     echo -e "  $0 ${RED}uninstall${NC}  卸载应用(保留数据)"
-    echo -e "  $0 ${BLUE}update${NC}     更新Docker镜像"
+    echo -e "  $0 ${BLUE}update${NC}     更新Docker镜像并重新创建容器"
 }
 
 # 主流程
