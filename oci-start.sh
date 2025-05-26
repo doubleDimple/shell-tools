@@ -117,6 +117,71 @@ check_and_download_jar() {
     fi
 }
 
+# 强制停止应用进程 - 修复版本
+force_stop_app() {
+    log_info "正在停止应用..."
+    
+    # 获取所有相关进程
+    local pids=$(pgrep -f "$JAR_PATH")
+    
+    if [ -z "$pids" ]; then
+        log_info "应用未在运行"
+        return 0
+    fi
+    
+    log_info "找到进程: $pids"
+    
+    # 尝试优雅停止
+    log_info "尝试优雅停止进程..."
+    for pid in $pids; do
+        if kill -TERM "$pid" 2>/dev/null; then
+            log_info "向进程 $pid 发送 TERM 信号"
+        fi
+    done
+    
+    # 等待进程停止
+    local wait_count=0
+    local max_wait=10
+    
+    while [ $wait_count -lt $max_wait ]; do
+        local remaining_pids=$(pgrep -f "$JAR_PATH")
+        if [ -z "$remaining_pids" ]; then
+            log_success "应用已优雅停止"
+            return 0
+        fi
+        
+        log_info "等待进程停止... ($((wait_count + 1))/$max_wait)"
+        sleep 1
+        wait_count=$((wait_count + 1))
+    done
+    
+    # 强制停止
+    log_warn "优雅停止失败，强制停止进程..."
+    local remaining_pids=$(pgrep -f "$JAR_PATH")
+    
+    if [ -n "$remaining_pids" ]; then
+        for pid in $remaining_pids; do
+            if kill -KILL "$pid" 2>/dev/null; then
+                log_info "强制停止进程 $pid"
+            fi
+        done
+        
+        # 再次检查
+        sleep 2
+        local final_pids=$(pgrep -f "$JAR_PATH")
+        if [ -z "$final_pids" ]; then
+            log_success "应用已强制停止"
+            return 0
+        else
+            log_error "无法停止进程: $final_pids"
+            return 1
+        fi
+    fi
+    
+    log_success "应用已停止"
+    return 0
+}
+
 start() {
     # 切换到脚本所在目录，确保所有操作基于此目录
     cd "$SCRIPT_REAL_DIR" || {
@@ -174,22 +239,8 @@ stop() {
         exit 1
     }
     
-    # 创建软链接，确保停止后仍然可以使用oci-start命令
-    create_symlink
-    
-    PIDS=$(pgrep -f "$JAR_PATH")
-    if [ -z "$PIDS" ]; then
-        log_warn "应用未在运行"
-        return
-    fi
-
-    log_info "正在停止应用..."
-    kill $PIDS
-    sleep 2
-    if pgrep -f "$JAR_PATH" > /dev/null; then
-        kill -9 $(pgrep -f "$JAR_PATH")
-    fi
-    log_success "应用已停止"
+    # 使用新的停止函数
+    force_stop_app
 }
 
 restart() {
@@ -255,6 +306,8 @@ update_latest() {
         fi
     fi
     
+    # 获取下载链接和版本信息
+    log_info "获取最新版本信息..."
     local download_url=$(curl -s "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
 
     if [ -z "$download_url" ]; then
@@ -270,7 +323,8 @@ update_latest() {
     local backup_file="${JAR_PATH}.${latest_version}.bak"
 
     # 下载新版本到临时文件
-    if curl -L -o "$temp_file" "$download_url"; then
+    log_info "下载新版本到临时文件: $temp_file"
+    if curl -L --connect-timeout 30 --max-time 300 -o "$temp_file" "$download_url"; then
         # 验证下载的文件是否是有效的JAR文件
         if ! file "$temp_file" | grep -q "Java archive"; then
             log_error "下载的文件不是有效的JAR文件"
@@ -278,25 +332,47 @@ update_latest() {
             return 1
         fi
         
-        log_info "文件下载成功，开始更新..."
+        log_success "文件下载成功，开始更新..."
         
-        # 停止应用
+        # 检查应用是否在运行
         local was_running=false
         if pgrep -f "$JAR_PATH" > /dev/null; then
             was_running=true
-            log_info "停止当前运行的应用..."
-            stop
-            # 等待进程完全停止
+            log_info "检测到应用正在运行，准备停止..."
+            
+            # 使用新的停止函数
+            if ! force_stop_app; then
+                log_error "停止应用失败"
+                rm -f "$temp_file"
+                return 1
+            fi
+            
+            # 确保进程完全停止
+            log_info "等待进程完全停止..."
             sleep 3
+            
+            # 再次确认进程已停止
+            if pgrep -f "$JAR_PATH" > /dev/null; then
+                log_error "进程仍在运行，无法继续更新"
+                rm -f "$temp_file"
+                return 1
+            fi
         fi
         
         # 备份原文件（如果存在）
         if [ -f "$JAR_PATH" ]; then
-            mv "$JAR_PATH" "$backup_file"
-            log_info "原JAR包已备份为: $backup_file"
+            log_info "备份原JAR包..."
+            if cp "$JAR_PATH" "$backup_file"; then
+                log_info "原JAR包已备份为: $backup_file"
+            else
+                log_error "备份失败"
+                rm -f "$temp_file"
+                return 1
+            fi
         fi
 
         # 使用原子操作替换文件
+        log_info "替换JAR包..."
         if mv "$temp_file" "$JAR_PATH"; then
             chmod +x "$JAR_PATH"
             log_success "JAR包更新完成，版本：${latest_version}"
@@ -304,27 +380,56 @@ update_latest() {
             # 如果之前在运行，则重新启动
             if [ "$was_running" = true ]; then
                 log_info "重新启动应用..."
-                start
+                
+                # 启动应用
+                nohup java $JVM_OPTS -jar "$JAR_PATH" > "$LOG_FILE" 2>&1 &
                 
                 # 验证启动是否成功
+                log_info "等待应用启动..."
                 sleep 5
-                if pgrep -f "$JAR_PATH" > /dev/null; then
-                    log_success "新版本启动成功，清理备份文件..."
-                    rm -f "$backup_file"
-                    return 0
-                else
-                    log_error "新版本启动失败，恢复备份文件"
-                    if [ -f "$backup_file" ]; then
-                        mv "$backup_file" "$JAR_PATH"
-                        log_info "已恢复到备份版本"
-                        start
+                
+                local start_check_count=0
+                local max_start_checks=6
+                
+                while [ $start_check_count -lt $max_start_checks ]; do
+                    if pgrep -f "$JAR_PATH" > /dev/null; then
+                        log_success "新版本启动成功！"
+                        rm -f "$backup_file"
+                        
+                        # 获取系统IP地址
+                        IP=$(hostname -I | awk '{print $1}')
+                        if [ -z "$IP" ]; then
+                            IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+                        fi
+                        
+                        echo -e "${BLUE}应用更新完成${NC}"
+                        echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
+                        return 0
                     fi
-                    return 1
+                    
+                    log_info "等待启动... ($((start_check_count + 1))/$max_start_checks)"
+                    sleep 5
+                    start_check_count=$((start_check_count + 1))
+                done
+                
+                # 启动失败，恢复备份
+                log_error "新版本启动失败，恢复备份文件"
+                if [ -f "$backup_file" ]; then
+                    mv "$backup_file" "$JAR_PATH"
+                    log_info "已恢复到备份版本，尝试重新启动..."
+                    nohup java $JVM_OPTS -jar "$JAR_PATH" > "$LOG_FILE" 2>&1 &
+                    sleep 3
+                    if pgrep -f "$JAR_PATH" > /dev/null; then
+                        log_info "备份版本启动成功"
+                    else
+                        log_error "备份版本也无法启动"
+                    fi
                 fi
+                return 1
             else
                 # 如果之前没有运行，清理备份文件
                 rm -f "$backup_file"
-                log_success "更新完成"
+                log_success "更新完成（应用未自动启动）"
                 return 0
             fi
         else
@@ -333,7 +438,7 @@ update_latest() {
             return 1
         fi
     else
-        log_error "下载失败"
+        log_error "下载失败，请检查网络连接"
         rm -f "$temp_file"
         return 1
     fi
@@ -367,7 +472,7 @@ uninstall() {
     # 停止应用
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_info "正在停止应用进程..."
-        stop
+        force_stop_app
         sleep 2
     fi
 
