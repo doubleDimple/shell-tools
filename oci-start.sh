@@ -82,6 +82,136 @@ install_java() {
     fi
 }
 
+# 检查Websockify是否已安装
+check_websockify() {
+    if ! command -v websockify &> /dev/null; then
+        log_warn "未检测到Websockify，准备安装..."
+        install_websockify
+    else
+        websockify_version=$(websockify --help 2>&1 | head -1 | grep -o 'v[0-9.]*' || echo "未知版本")
+        log_info "检测到Websockify版本: $websockify_version"
+    fi
+}
+
+# 安装Websockify
+install_websockify() {
+    log_info "开始安装Websockify..."
+    
+    # 首先检查Python是否已安装
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+        log_info "Python未安装，正在安装Python..."
+        if command -v apt &> /dev/null; then
+            # Debian/Ubuntu
+            apt update -y
+            DEBIAN_FRONTEND=noninteractive apt install -y python3 python3-pip
+        elif command -v yum &> /dev/null; then
+            # CentOS/RHEL
+            yum update -y
+            yum install -y python3 python3-pip
+        elif command -v dnf &> /dev/null; then
+            # Fedora
+            dnf update -y
+            dnf install -y python3 python3-pip
+        else
+            log_error "不支持的操作系统，请手动安装Python"
+            exit 1
+        fi
+    fi
+    
+    # 确定使用的Python命令
+    PYTHON_CMD=""
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD="python3"
+    elif command -v python &> /dev/null; then
+        PYTHON_CMD="python"
+    else
+        log_error "Python安装后仍无法找到，请检查安装"
+        exit 1
+    fi
+    
+    # 检查pip是否可用
+    PIP_CMD=""
+    if command -v pip3 &> /dev/null; then
+        PIP_CMD="pip3"
+    elif command -v pip &> /dev/null; then
+        PIP_CMD="pip"
+    elif $PYTHON_CMD -m pip --version &> /dev/null; then
+        PIP_CMD="$PYTHON_CMD -m pip"
+    else
+        log_error "pip未找到，尝试安装pip..."
+        if command -v apt &> /dev/null; then
+            apt install -y python3-pip
+            PIP_CMD="pip3"
+        elif command -v yum &> /dev/null; then
+            yum install -y python3-pip
+            PIP_CMD="pip3"
+        elif command -v dnf &> /dev/null; then
+            dnf install -y python3-pip
+            PIP_CMD="pip3"
+        else
+            log_error "无法安装pip，请手动安装"
+            exit 1
+        fi
+    fi
+    
+    # 尝试通过包管理器安装websockify
+    local installed_via_package=false
+    if command -v apt &> /dev/null; then
+        # Debian/Ubuntu - 尝试通过apt安装
+        log_info "尝试通过apt安装websockify..."
+        if apt install -y websockify 2>/dev/null; then
+            installed_via_package=true
+            log_success "通过apt成功安装websockify"
+        else
+            log_warn "apt安装websockify失败，将使用pip安装"
+        fi
+    elif command -v yum &> /dev/null; then
+        # CentOS/RHEL - 通常需要EPEL源
+        log_info "尝试通过yum安装websockify..."
+        if yum install -y python3-websockify 2>/dev/null || yum install -y websockify 2>/dev/null; then
+            installed_via_package=true
+            log_success "通过yum成功安装websockify"
+        else
+            log_warn "yum安装websockify失败，将使用pip安装"
+        fi
+    elif command -v dnf &> /dev/null; then
+        # Fedora
+        log_info "尝试通过dnf安装websockify..."
+        if dnf install -y python3-websockify 2>/dev/null; then
+            installed_via_package=true
+            log_success "通过dnf成功安装websockify"
+        else
+            log_warn "dnf安装websockify失败，将使用pip安装"
+        fi
+    fi
+    
+    # 如果包管理器安装失败，使用pip安装
+    if [ "$installed_via_package" = false ]; then
+        log_info "使用pip安装websockify..."
+        if $PIP_CMD install websockify; then
+            log_success "通过pip成功安装websockify"
+        else
+            log_error "pip安装websockify失败，尝试升级pip后重试..."
+            $PIP_CMD install --upgrade pip
+            if $PIP_CMD install websockify; then
+                log_success "升级pip后成功安装websockify"
+            else
+                log_error "websockify安装失败，请手动安装"
+                exit 1
+            fi
+        fi
+    fi
+    
+    # 验证安装
+    if ! command -v websockify &> /dev/null; then
+        log_error "websockify安装失败，命令不可用"
+        exit 1
+    else
+        websockify_version=$(websockify --help 2>&1 | head -1 | grep -o 'v[0-9.]*' || echo "未知版本")
+        log_success "Websockify安装成功，版本: $websockify_version"
+    fi
+}
+
 # 创建软链接
 create_symlink() {
     if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
@@ -126,6 +256,9 @@ start() {
     
     # 检查Java安装，自动安装JDK
     check_java
+    
+    # 检查Websockify安装，自动安装Websockify
+    check_websockify
     
     # 检查并下载jar包
     check_and_download_jar
@@ -229,6 +362,7 @@ restart() {
     
     # 重启时也检查环境
     check_java
+    check_websockify
     create_symlink
     stop
     start
@@ -243,6 +377,7 @@ status() {
     
     # 在所有命令中都增加环境检查
     check_java
+    check_websockify
     create_symlink
     
     if pgrep -f "$JAR_PATH" > /dev/null; then
@@ -262,6 +397,9 @@ update_latest() {
     
     # 检查Java安装
     check_java
+    
+    # 检查Websockify安装
+    check_websockify
     
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
@@ -426,6 +564,7 @@ uninstall() {
     if [ ! -f "$JAR_PATH" ] && [ ! -L "$SYMLINK_PATH" ]; then
         log_success "应用卸载完成"
         echo -e "${GREEN}如需重新安装应用，请使用 'start' 命令${NC}"
+        echo -e "${YELLOW}注意: Java和Websockify未被卸载，如需卸载请手动操作${NC}"
     else
         log_error "卸载未完全成功，请检查日志"
     fi
