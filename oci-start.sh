@@ -89,7 +89,6 @@ check_websockify() {
         install_websockify
     else
         websockify_version=$(websockify --help 2>&1 | head -1 | grep -o 'v[0-9.]*' || echo "未知版本")
-        log_info "检测到Websockify版本: $websockify_version"
     fi
 }
 
