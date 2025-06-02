@@ -51,6 +51,140 @@ APP_CONTAINER_NAME="oci-start"
 SCRIPT_PATH=$(realpath "$0")
 SYMLINK_PATH="/usr/local/bin/oci-start-docker"
 
+# 检测并安装websockify
+install_websockify() {
+    log_info "检查websockify是否已安装..."
+    
+    # 检查websockify命令是否存在
+    if command -v websockify &> /dev/null; then
+        log_success "websockify已安装"
+        websockify --version 2>/dev/null || log_info "websockify版本信息获取失败，但命令可用"
+        return 0
+    fi
+    
+    # 检查Python是否安装websockify模块
+    if python3 -c "import websockify" &> /dev/null || python -c "import websockify" &> /dev/null; then
+        log_success "websockify Python模块已安装"
+        return 0
+    fi
+    
+    log_warn "websockify未安装，开始安装..."
+    
+    # 尝试多种安装方式
+    local install_success=false
+    
+    # 方式1: 使用apt包管理器安装
+    if command -v apt &> /dev/null; then
+        log_info "尝试使用apt安装websockify..."
+        if apt update -y && apt install -y websockify; then
+            if command -v websockify &> /dev/null; then
+                log_success "通过apt成功安装websockify"
+                install_success=true
+            fi
+        else
+            log_warn "通过apt安装websockify失败"
+        fi
+    fi
+    
+    # 方式2: 使用yum包管理器安装 (CentOS/RHEL)
+    if [ "$install_success" = false ] && command -v yum &> /dev/null; then
+        log_info "尝试使用yum安装websockify..."
+        if yum install -y python3-websockify || yum install -y websockify; then
+            if command -v websockify &> /dev/null; then
+                log_success "通过yum成功安装websockify"
+                install_success=true
+            fi
+        else
+            log_warn "通过yum安装websockify失败"
+        fi
+    fi
+    
+    # 方式3: 使用pip安装
+    if [ "$install_success" = false ]; then
+        log_info "尝试使用pip安装websockify..."
+        
+        # 首先确保pip已安装
+        if ! command -v pip3 &> /dev/null && ! command -v pip &> /dev/null; then
+            log_info "pip未安装，正在安装pip..."
+            if command -v apt &> /dev/null; then
+                apt install -y python3-pip
+            elif command -v yum &> /dev/null; then
+                yum install -y python3-pip
+            fi
+        fi
+        
+        # 使用pip安装websockify
+        local pip_cmd=""
+        if command -v pip3 &> /dev/null; then
+            pip_cmd="pip3"
+        elif command -v pip &> /dev/null; then
+            pip_cmd="pip"
+        fi
+        
+        if [ -n "$pip_cmd" ]; then
+            log_info "使用 $pip_cmd 安装websockify..."
+            if $pip_cmd install websockify; then
+                # 检查安装是否成功
+                if command -v websockify &> /dev/null || python3 -c "import websockify" &> /dev/null; then
+                    log_success "通过pip成功安装websockify"
+                    install_success=true
+                fi
+            else
+                log_warn "通过pip安装websockify失败"
+            fi
+        fi
+    fi
+    
+    # 方式4: 从源码安装
+    if [ "$install_success" = false ]; then
+        log_info "尝试从GitHub源码安装websockify..."
+        
+        # 确保git已安装
+        if ! command -v git &> /dev/null; then
+            log_info "安装git..."
+            if command -v apt &> /dev/null; then
+                apt install -y git
+            elif command -v yum &> /dev/null; then
+                yum install -y git
+            fi
+        fi
+        
+        if command -v git &> /dev/null; then
+            local temp_dir="/tmp/websockify-install"
+            rm -rf "$temp_dir"
+            
+            if git clone https://github.com/novnc/websockify "$temp_dir"; then
+                cd "$temp_dir"
+                if python3 setup.py install || python setup.py install; then
+                    log_success "从源码成功安装websockify"
+                    install_success=true
+                fi
+                cd - > /dev/null
+                rm -rf "$temp_dir"
+            else
+                log_warn "从GitHub克隆websockify失败"
+            fi
+        fi
+    fi
+    
+    # 最终检查
+    if [ "$install_success" = true ]; then
+        log_success "websockify安装完成"
+        # 显示版本信息
+        if command -v websockify &> /dev/null; then
+            websockify --version 2>/dev/null || log_info "websockify命令可用"
+        fi
+        return 0
+    else
+        log_error "websockify安装失败，请手动安装"
+        echo -e "${YELLOW}手动安装方法:${NC}"
+        echo -e "1. 使用包管理器: ${GREEN}apt install websockify${NC} 或 ${GREEN}yum install websockify${NC}"
+        echo -e "2. 使用pip: ${GREEN}pip3 install websockify${NC}"
+        echo -e "3. 从源码安装: ${GREEN}git clone https://github.com/novnc/websockify && cd websockify && python3 setup.py install${NC}"
+        return 1
+    fi
+}
+
 # 创建软链接
 create_symlink() {
     if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
@@ -74,35 +208,14 @@ create_symlink() {
 
 # 安装Docker
 install_docker() {
-    log_info "检查Docker是否已安装..."
-    if command -v docker &> /dev/null; then
-        if docker info &> /dev/null; then
-            log_success "Docker已安装并正常运行"
-            return 0
-        else
-            log_warn "Docker已安装但服务未运行，尝试启动服务..."
-            systemctl start docker &> /dev/null || service docker start &> /dev/null
-            if docker info &> /dev/null; then
-                log_success "Docker服务已成功启动"
-                return 0
-            else
-                log_error "无法启动Docker服务，尝试重新安装"
-            fi
-        fi
-    fi
-
     log_info "开始安装Docker..."
-    log_info "正在更新系统包..."
-    apt update -y || { log_error "系统更新失败"; return 1; }
     
-    log_info "正在安装curl..."
-    apt install -y curl || { log_error "安装curl失败"; return 1; }
-    
-    log_info "正在下载并安装Docker..."
-    curl -fsSL https://get.docker.com | bash -s docker
-    
-    if [ $? -ne 0 ]; then
-        log_error "Docker安装失败"
+    # 使用一键安装脚本
+    log_info "正在执行Docker一键安装..."
+    if apt update -y && apt install -y curl && curl -fsSL https://get.docker.com | bash -s docker; then
+        log_success "Docker安装脚本执行完成"
+    else
+        log_error "Docker一键安装失败"
         return 1
     fi
     
@@ -110,13 +223,34 @@ install_docker() {
     log_info "启动Docker服务..."
     systemctl start docker &> /dev/null || service docker start &> /dev/null
     
+    # 设置Docker服务自启动
+    systemctl enable docker &> /dev/null || true
+    
     # 验证安装
+    sleep 3  # 等待服务完全启动
     if command -v docker &> /dev/null && docker info &> /dev/null; then
         log_success "Docker安装成功并已启动服务"
+        
+        # 显示Docker版本信息
+        local docker_version=$(docker --version 2>/dev/null)
+        log_info "Docker版本: $docker_version"
+        
         return 0
     else
         log_error "Docker安装完成但服务未能正常启动"
-        return 1
+        log_info "尝试手动启动Docker服务..."
+        
+        # 尝试不同的启动方式
+        service docker start &> /dev/null || systemctl start docker &> /dev/null
+        sleep 5
+        
+        if docker info &> /dev/null; then
+            log_success "Docker服务手动启动成功"
+            return 0
+        else
+            log_error "Docker服务启动失败，请检查系统日志"
+            return 1
+        fi
     fi
 }
 
@@ -369,28 +503,44 @@ uninstall() {
 
 # 检查Docker是否已安装
 check_docker() {
+    log_info "检查Docker是否已安装..."
+    
     # 首先检查Docker是否已安装
-    if ! command -v docker &> /dev/null; then
-        log_warn "Docker未安装，准备自动安装..."
-        install_docker
-        return $?
-    fi
-
-    # 检查Docker服务是否运行
-    if docker info >/dev/null 2>&1; then
-        log_success "Docker服务运行正常"
-        return 0
-    else
-        log_warn "Docker已安装但服务未运行，尝试启动服务..."
-        systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1
-        
+    if command -v docker &> /dev/null; then
+        # 检查Docker服务是否运行
         if docker info >/dev/null 2>&1; then
-            log_success "Docker服务已成功启动"
+            log_success "Docker已安装并正常运行"
+            
+            # 显示Docker版本信息
+            local docker_version=$(docker --version 2>/dev/null)
+            log_info "Docker版本: $docker_version"
+            
             return 0
         else
-            log_error "无法启动Docker服务，请检查Docker安装"
-            return 1
+            log_warn "Docker已安装但服务未运行，尝试启动服务..."
+            systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1
+            
+            # 等待服务启动
+            sleep 3
+            
+            if docker info >/dev/null 2>&1; then
+                log_success "Docker服务已成功启动"
+                return 0
+            else
+                log_warn "无法启动Docker服务，将重新安装Docker"
+                # 继续执行安装流程
+            fi
         fi
+    else
+        log_warn "Docker未安装，开始自动安装..."
+    fi
+    
+    # 执行Docker安装
+    if install_docker; then
+        return 0
+    else
+        log_error "Docker安装失败"
+        return 1
     fi
 }
 
@@ -514,6 +664,11 @@ main() {
     # 检查Docker安装状态
     if ! check_docker; then
         exit 1
+    fi
+    
+    # 检查websockify安装状态
+    if ! install_websockify; then
+        log_warn "websockify安装失败，但脚本将继续执行"
     fi
 
     case "$1" in
