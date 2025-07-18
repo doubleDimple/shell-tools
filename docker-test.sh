@@ -8,7 +8,6 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-
 # 使用示例
 # 1. 默认安装（将安装到 /root/oci-start-docker 目录）：
 #    ./docker.sh install
@@ -28,7 +27,6 @@ NC='\033[0m' # No Color
 #
 # 3. 卸载应用：
 #    ./docker.sh uninstall
-
 
 # 日志函数
 log_info() {
@@ -50,6 +48,211 @@ log_success() {
 # 配置变量
 APP_DIR="${OCI_APP_DIR:-/root/oci-start-docker}"
 APP_CONTAINER_NAME="oci-start"
+SCRIPT_PATH=$(realpath "$0")
+SYMLINK_PATH="/usr/local/bin/oci-start-docker"
+
+# 检测并安装websockify
+install_websockify() {
+    log_info "检查websockify是否已安装..."
+    
+    # 检查websockify命令是否存在
+    if command -v websockify &> /dev/null; then
+        log_success "websockify已安装"
+        websockify --version 2>/dev/null || log_info "websockify版本信息获取失败，但命令可用"
+        return 0
+    fi
+    
+    # 检查Python是否安装websockify模块
+    if python3 -c "import websockify" &> /dev/null || python -c "import websockify" &> /dev/null; then
+        log_success "websockify Python模块已安装"
+        return 0
+    fi
+    
+    log_warn "websockify未安装，开始安装..."
+    
+    # 尝试多种安装方式
+    local install_success=false
+    
+    # 方式1: 使用apt包管理器安装
+    if command -v apt &> /dev/null; then
+        log_info "尝试使用apt安装websockify..."
+        if apt update -y && apt install -y websockify; then
+            if command -v websockify &> /dev/null; then
+                log_success "通过apt成功安装websockify"
+                install_success=true
+            fi
+        else
+            log_warn "通过apt安装websockify失败"
+        fi
+    fi
+    
+    # 方式2: 使用yum包管理器安装 (CentOS/RHEL)
+    if [ "$install_success" = false ] && command -v yum &> /dev/null; then
+        log_info "尝试使用yum安装websockify..."
+        if yum install -y python3-websockify || yum install -y websockify; then
+            if command -v websockify &> /dev/null; then
+                log_success "通过yum成功安装websockify"
+                install_success=true
+            fi
+        else
+            log_warn "通过yum安装websockify失败"
+        fi
+    fi
+    
+    # 方式3: 使用pip安装
+    if [ "$install_success" = false ]; then
+        log_info "尝试使用pip安装websockify..."
+        
+        # 首先确保pip已安装
+        if ! command -v pip3 &> /dev/null && ! command -v pip &> /dev/null; then
+            log_info "pip未安装，正在安装pip..."
+            if command -v apt &> /dev/null; then
+                apt install -y python3-pip
+            elif command -v yum &> /dev/null; then
+                yum install -y python3-pip
+            fi
+        fi
+        
+        # 使用pip安装websockify
+        local pip_cmd=""
+        if command -v pip3 &> /dev/null; then
+            pip_cmd="pip3"
+        elif command -v pip &> /dev/null; then
+            pip_cmd="pip"
+        fi
+        
+        if [ -n "$pip_cmd" ]; then
+            log_info "使用 $pip_cmd 安装websockify..."
+            if $pip_cmd install websockify; then
+                # 检查安装是否成功
+                if command -v websockify &> /dev/null || python3 -c "import websockify" &> /dev/null; then
+                    log_success "通过pip成功安装websockify"
+                    install_success=true
+                fi
+            else
+                log_warn "通过pip安装websockify失败"
+            fi
+        fi
+    fi
+    
+    # 方式4: 从源码安装
+    if [ "$install_success" = false ]; then
+        log_info "尝试从GitHub源码安装websockify..."
+        
+        # 确保git已安装
+        if ! command -v git &> /dev/null; then
+            log_info "安装git..."
+            if command -v apt &> /dev/null; then
+                apt install -y git
+            elif command -v yum &> /dev/null; then
+                yum install -y git
+            fi
+        fi
+        
+        if command -v git &> /dev/null; then
+            local temp_dir="/tmp/websockify-install"
+            rm -rf "$temp_dir"
+            
+            if git clone https://github.com/novnc/websockify "$temp_dir"; then
+                cd "$temp_dir"
+                if python3 setup.py install || python setup.py install; then
+                    log_success "从源码成功安装websockify"
+                    install_success=true
+                fi
+                cd - > /dev/null
+                rm -rf "$temp_dir"
+            else
+                log_warn "从GitHub克隆websockify失败"
+            fi
+        fi
+    fi
+    
+    # 最终检查
+    if [ "$install_success" = true ]; then
+        log_success "websockify安装完成"
+        # 显示版本信息
+        if command -v websockify &> /dev/null; then
+            websockify --version 2>/dev/null || log_info "websockify命令可用"
+        fi
+        return 0
+    else
+        log_error "websockify安装失败，请手动安装"
+        echo -e "${YELLOW}手动安装方法:${NC}"
+        echo -e "1. 使用包管理器: ${GREEN}apt install websockify${NC} 或 ${GREEN}yum install websockify${NC}"
+        echo -e "2. 使用pip: ${GREEN}pip3 install websockify${NC}"
+        echo -e "3. 从源码安装: ${GREEN}git clone https://github.com/novnc/websockify && cd websockify && python3 setup.py install${NC}"
+        return 1
+    fi
+}
+
+# 创建软链接
+create_symlink() {
+    if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
+        log_info "创建软链接: $SYMLINK_PATH -> $SCRIPT_PATH"
+        # 确保目标目录存在
+        mkdir -p "$(dirname "$SYMLINK_PATH")" 2>/dev/null
+        # 尝试创建软链接，如果没有权限则提示使用sudo
+        if ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
+            log_success "软链接创建成功，现在可以使用 'oci-start-docker' 命令"
+        else
+            log_warn "没有权限创建软链接，尝试使用sudo"
+            if command -v sudo &>/dev/null; then
+                sudo ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH"
+                log_success "软链接创建成功，现在可以使用 'oci-start-docker' 命令"
+            else
+                log_error "创建软链接失败，请确保有足够权限或手动创建"
+            fi
+        fi
+    fi
+}
+
+# 安装Docker
+install_docker() {
+    log_info "开始安装Docker..."
+    
+    # 使用一键安装脚本
+    log_info "正在执行Docker一键安装..."
+    if apt update -y && apt install -y curl && curl -fsSL https://get.docker.com | bash -s docker; then
+        log_success "Docker安装脚本执行完成"
+    else
+        log_error "Docker一键安装失败"
+        return 1
+    fi
+    
+    # 启动Docker服务
+    log_info "启动Docker服务..."
+    systemctl start docker &> /dev/null || service docker start &> /dev/null
+    
+    # 设置Docker服务自启动
+    systemctl enable docker &> /dev/null || true
+    
+    # 验证安装
+    sleep 3  # 等待服务完全启动
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        log_success "Docker安装成功并已启动服务"
+        
+        # 显示Docker版本信息
+        local docker_version=$(docker --version 2>/dev/null)
+        log_info "Docker版本: $docker_version"
+        
+        return 0
+    else
+        log_error "Docker安装完成但服务未能正常启动"
+        log_info "尝试手动启动Docker服务..."
+        
+        # 尝试不同的启动方式
+        service docker start &> /dev/null || systemctl start docker &> /dev/null
+        sleep 5
+        
+        if docker info &> /dev/null; then
+            log_success "Docker服务手动启动成功"
+            return 0
+        else
+            log_error "Docker服务启动失败，请检查系统日志"
+            return 1
+        fi
+    fi
+}
 
 # 添加路径检查函数
 check_script_path() {
@@ -144,7 +347,7 @@ deploy_app() {
 
     # 检查并拉取最新镜像
     log_info "拉取最新镜像..."
-    if ! docker pull lovele/oci-start-test:latest; then
+    if ! docker pull lovele/oci-start:latest; then
         log_error "拉取镜像失败"
         return 1
     fi
@@ -164,8 +367,8 @@ deploy_app() {
         -e DATA_PATH=/oci-start/data \
         -e LOG_HOME=/oci-start/logs \
         --network host \
-        --rm \
-        lovele/oci-start-test:latest; then
+        --restart always \
+        lovele/oci-start:latest; then
 
         log_success "Docker应用部署成功"
 
@@ -201,8 +404,8 @@ deploy_app() {
 
 # 卸载函数
 uninstall() {
-    local app_dir="/root/oci-start-docker"
-    local container_name="oci-start"
+    local app_dir="${APP_DIR}"
+    local container_name="$APP_CONTAINER_NAME"
 
     # 显示确认提示
     echo -e "${YELLOW}===== 卸载确认 =====${NC}"
@@ -283,6 +486,13 @@ uninstall() {
         log_info "未发现相关Docker镜像"
     fi
 
+    # 删除软链接
+    if [ -L "$SYMLINK_PATH" ] && [ "$(readlink "$SYMLINK_PATH")" = "$SCRIPT_PATH" ]; then
+        log_info "删除软链接: $SYMLINK_PATH"
+        rm -f "$SYMLINK_PATH"
+        log_success "软链接已删除"
+    fi
+
     log_success "==========================="
     log_success "应用卸载已完成!"
     echo -e "\n${GREEN}保留的内容:${NC}"
@@ -293,55 +503,144 @@ uninstall() {
 
 # 检查Docker是否已安装
 check_docker() {
-    if ! command -v docker &> /dev/null; then
-        log_error "Docker未安装，请先安装Docker"
-        return 1
+    log_info "检查Docker是否已安装..."
+    
+    # 首先检查Docker是否已安装
+    if command -v docker &> /dev/null; then
+        # 检查Docker服务是否运行
+        if docker info >/dev/null 2>&1; then
+            log_success "Docker已安装并正常运行"
+            
+            # 显示Docker版本信息
+            local docker_version=$(docker --version 2>/dev/null)
+            log_info "Docker版本: $docker_version"
+            
+            return 0
+        else
+            log_warn "Docker已安装但服务未运行，尝试启动服务..."
+            systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1
+            
+            # 等待服务启动
+            sleep 3
+            
+            if docker info >/dev/null 2>&1; then
+                log_success "Docker服务已成功启动"
+                return 0
+            else
+                log_warn "无法启动Docker服务，将重新安装Docker"
+                # 继续执行安装流程
+            fi
+        fi
+    else
+        log_warn "Docker未安装，开始自动安装..."
     fi
-
-    # 在容器内，我们只需要检查 docker 命令是否可用，不需要检查服务
-    if docker info >/dev/null 2>&1; then
-        log_success "Docker可用"
+    
+    # 执行Docker安装
+    if install_docker; then
         return 0
     else
-        log_error "Docker守护进程无响应，请检查Docker Socket挂载"
+        log_error "Docker安装失败"
+        return 1
+    fi
+}
+
+# 修复更新函数 - 拉取最新镜像并重新创建容器
+update() {
+    # 确保软链接存在
+    create_symlink
+    
+    log_info "开始更新Docker应用..."
+
+    # 检查容器是否存在
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^${APP_CONTAINER_NAME}$"; then
+        log_error "未找到容器 ${APP_CONTAINER_NAME}，请先安装应用"
         return 1
     fi
 
-    log_success "Docker服务运行正常"
-    return 0
-}
+    # 获取当前镜像ID
+    local old_image_id=$(docker inspect "$APP_CONTAINER_NAME" --format='{{.Image}}' 2>/dev/null)
+    log_info "当前镜像ID: $old_image_id"
 
-# 更新函数 - 拉取最新镜像并重启容器
-update() {
-    log_info "开始更新Docker镜像..."
-
-    # 检查并拉取最新镜像
+    # 拉取最新镜像
     log_info "拉取最新镜像..."
-    if ! docker pull lovele/oci-start-test:latest; then
+    if ! docker pull lovele/oci-start:latest; then
         log_error "拉取镜像失败"
         return 1
     fi
 
-    log_success "Docker镜像更新成功!"
+    # 获取新镜像ID
+    local new_image_id=$(docker images lovele/oci-start:latest --format='{{.ID}}' | head -n1)
+    log_info "新镜像ID: $new_image_id"
 
-    # 重启容器
-    log_info "重启容器使用新镜像..."
-    if docker restart "$APP_CONTAINER_NAME"; then
-        log_success "容器重启成功！"
+    # 检查镜像是否有更新
+    if [ "$old_image_id" = "$new_image_id" ]; then
+        log_info "镜像已是最新版本，无需更新"
+        return 0
+    fi
+
+    log_info "检测到新版本，开始更新容器..."
+
+    # 停止并删除旧容器
+    log_info "停止并删除旧容器..."
+    if ! remove_container "$APP_CONTAINER_NAME"; then
+        log_error "删除旧容器失败"
+        return 1
+    fi
+
+    # 等待容器完全删除
+    sleep 3
+
+    # 使用新镜像重新创建容器
+    log_info "使用新镜像创建容器..."
+    if docker run -d \
+        --name "$APP_CONTAINER_NAME" \
+        -p 9856:9856 \
+        -v "$APP_DIR/data:/oci-start/data" \
+        -v "$APP_DIR/logs:/oci-start/logs" \
+        -v "$APP_DIR/docker.sh:/oci-start/docker.sh" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /usr/bin/docker:/usr/bin/docker \
+        -e SERVER_PORT=9856 \
+        -e OCI_APP_DIR=/oci-start \
+        -e DATA_PATH=/oci-start/data \
+        -e LOG_HOME=/oci-start/logs \
+        --network host \
+        --restart always \
+        lovele/oci-start:latest; then
+
+        log_success "容器创建成功"
 
         # 等待容器启动
         sleep 5
 
         # 验证容器运行状态
         if docker ps | grep -q "$APP_CONTAINER_NAME"; then
-            log_success "容器已成功重启并运行"
+            log_success "Docker应用更新完成并已成功启动！"
+            
+            # 清理旧镜像（如果存在且不同于新镜像）
+            if [ -n "$old_image_id" ] && [ "$old_image_id" != "$new_image_id" ]; then
+                log_info "清理旧镜像..."
+                docker rmi "$old_image_id" >/dev/null 2>&1 || true
+            fi
+            
+            # 获取系统IP
+            IP=$(hostname -I | awk '{print $1}')
+            if [ -z "$IP" ]; then
+                IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+            fi
+
+            # 显示访问信息
+            echo -e "${BLUE}应用已更新完成${NC}"
+            echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
+            
             return 0
         else
-            log_error "容器重启后未能正常运行"
+            log_error "容器创建后未能正常运行"
+            docker logs "$APP_CONTAINER_NAME"
             return 1
         fi
     else
-        log_error "容器重启失败"
+        log_error "创建新容器失败"
         return 1
     fi
 }
@@ -351,21 +650,32 @@ show_help() {
     echo -e "${YELLOW}使用方法:${NC}"
     echo -e "  $0 ${GREEN}install${NC}    安装并部署应用"
     echo -e "  $0 ${RED}uninstall${NC}  卸载应用(保留数据)"
-    echo -e "  $0 ${BLUE}update${NC}     更新Docker镜像"
+    echo -e "  $0 ${BLUE}update${NC}     更新Docker镜像并重新创建容器"
 }
 
 # 主流程
 main() {
     # 首先检查和设置路径
     check_script_path
+    
+    # 确保是最新路径
+    SCRIPT_PATH=$(realpath "$0")
 
     # 检查Docker安装状态
     if ! check_docker; then
         exit 1
     fi
+    
+    # 检查websockify安装状态
+    if ! install_websockify; then
+        log_warn "websockify安装失败，但脚本将继续执行"
+    fi
 
     case "$1" in
         "install")
+            # 创建软链接
+            create_symlink
+            
             # 创建应用目录结构
             create_app_structure
 
@@ -374,6 +684,7 @@ main() {
 
             if [ $? -eq 0 ]; then
                 log_success "全部部署完成！"
+                echo -e "${GREEN}现在可以使用 'oci-start-docker' 命令来管理应用${NC}"
             else
                 log_error "部署过程中出现错误，请检查以上日志"
                 exit 1
