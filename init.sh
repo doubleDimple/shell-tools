@@ -61,34 +61,116 @@ detect_system() {
     fi
 }
 
+# 检测网络环境并选择最佳镜像源
+detect_best_mirror() {
+    log_info "检测网络环境，选择最佳镜像源..."
+    
+    # 测试不同镜像源的连通性和速度
+    local mirrors=(
+        "http://deb.debian.org/debian"           # 官方源
+        "http://mirrors.aliyun.com/debian"       # 阿里云（中国）
+        "http://mirrors.tuna.tsinghua.edu.cn/debian"  # 清华大学（中国）
+        "http://mirror.sjtu.edu.cn/debian"       # 上海交大（中国）
+        "http://ftp.us.debian.org/debian"        # 美国镜像
+        "http://ftp.de.debian.org/debian"        # 德国镜像
+    )
+    
+    local security_mirrors=(
+        "http://security.debian.org/debian-security"        # 官方安全源
+        "http://mirrors.aliyun.com/debian-security"         # 阿里云安全源
+        "http://mirrors.tuna.tsinghua.edu.cn/debian-security" # 清华安全源
+    )
+    
+    local best_mirror=""
+    local best_security=""
+    local fastest_time=999999
+    
+    for mirror in "${mirrors[@]}"; do
+        log_info "测试镜像源: $mirror"
+        local start_time=$(date +%s%N)
+        if timeout 10 curl -s --head "$mirror/ls-lR.gz" > /dev/null 2>&1; then
+            local end_time=$(date +%s%N)
+            local response_time=$(( (end_time - start_time) / 1000000 ))
+            log_info "响应时间: ${response_time}ms"
+            
+            if [ $response_time -lt $fastest_time ]; then
+                fastest_time=$response_time
+                best_mirror="$mirror"
+                
+                # 根据选择的主镜像确定对应的安全镜像
+                case "$mirror" in
+                    *aliyun*)
+                        best_security="http://mirrors.aliyun.com/debian-security"
+                        ;;
+                    *tuna*)
+                        best_security="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                        ;;
+                    *)
+                        best_security="http://security.debian.org/debian-security"
+                        ;;
+                esac
+            fi
+        else
+            log_warn "镜像源不可达: $mirror"
+        fi
+    done
+    
+    if [ -z "$best_mirror" ]; then
+        log_warn "所有镜像源测试失败，使用默认官方源"
+        best_mirror="http://deb.debian.org/debian"
+        best_security="http://security.debian.org/debian-security"
+    else
+        log_info "选择最佳镜像源: $best_mirror (${fastest_time}ms)"
+        log_info "对应安全源: $best_security"
+    fi
+    
+    echo "$best_mirror|$best_security"
+}
+
 # 修复Debian源配置
 fix_debian_sources() {
     log_step "检查并修复Debian软件源配置..."
     
     if [[ "$ID" == "debian" ]]; then
-        # 检查是否是bullseye版本且有源问题
-        if grep -q "bullseye/updates" /etc/apt/sources.list* 2>/dev/null; then
-            log_info "检测到Debian bullseye源配置问题，正在修复..."
-            
-            # 备份原始sources.list
+        log_info "检测到Debian系统，配置最优镜像源..."
+        
+        # 备份原始sources.list
+        if [[ -f /etc/apt/sources.list ]]; then
             sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d_%H%M%S)
-            
-            # 修复bullseye源配置
-            sudo sed -i 's|bullseye/updates|bullseye-security|g' /etc/apt/sources.list
-            sudo sed -i 's|security.debian.org|security.debian.org/debian-security|g' /etc/apt/sources.list
-            
-            # 如果存在sources.list.d目录下的文件也需要修复
-            if ls /etc/apt/sources.list.d/*.list >/dev/null 2>&1; then
-                sudo sed -i 's|bullseye/updates|bullseye-security|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-                sudo sed -i 's|security.debian.org|security.debian.org/debian-security|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-            fi
-            
-            log_info "Debian源配置已修复"
+            log_info "已备份原始sources.list"
         fi
         
-        # 清理apt缓存并重新更新
+        # 获取版本代号
+        VERSION_CODENAME=$(lsb_release -cs)
+        log_info "检测到Debian版本: $VERSION_CODENAME"
+        
+        # 检测最佳镜像源
+        local mirror_result=$(detect_best_mirror)
+        local best_mirror=$(echo "$mirror_result" | cut -d'|' -f1)
+        local best_security=$(echo "$mirror_result" | cut -d'|' -f2)
+        
+        # 配置sources.list
+        log_info "配置Debian镜像源..."
+        cat <<EOF | sudo tee /etc/apt/sources.list > /dev/null
+# Debian $VERSION_CODENAME repositories - 自动选择最优镜像源
+deb $best_mirror $VERSION_CODENAME main contrib non-free
+deb-src $best_mirror $VERSION_CODENAME main contrib non-free
+
+# Debian $VERSION_CODENAME updates
+deb $best_mirror $VERSION_CODENAME-updates main contrib non-free
+deb-src $best_mirror $VERSION_CODENAME-updates main contrib non-free
+
+# Debian $VERSION_CODENAME security updates
+deb $best_security $VERSION_CODENAME-security main contrib non-free
+deb-src $best_security $VERSION_CODENAME-security main contrib non-free
+EOF
+        
+        log_info "已配置最优镜像源"
+        
+        # 清理并更新
         sudo apt clean
-        sudo apt update --fix-missing -y
+        sudo apt update -y
+        log_info "软件源更新完成"
     fi
 }
     log_step "更新系统软件包..."
@@ -141,8 +223,25 @@ install_docker() {
         log_info "Docker已安装，版本: $(docker --version)"
     else
         log_info "安装Docker..."
-        # 使用官方安装脚本
-        curl -fsSL https://get.docker.com | bash -s docker
+        
+        # 确保源配置正确后再安装Docker
+        log_info "准备Docker安装环境..."
+        sudo apt update -y
+        
+        # 安装必要的依赖
+        sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
+        
+        # 添加Docker官方GPG密钥
+        curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        
+        # 添加Docker仓库
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        
+        # 更新包索引
+        sudo apt update -y
+        
+        # 安装Docker
+        sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
         
         # 将当前用户添加到docker组（如果不是root用户）
         if [[ $EUID -ne 0 ]]; then
