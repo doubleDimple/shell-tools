@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Linux系统初始化脚本 - 支持Ubuntu和Debian
-# 作者: Claude
+# 作者: doubleDimple
 # 功能: 安装必要组件、设置上海时区、配置彩色命令行
 
 set -e  # 遇到错误时退出
@@ -61,8 +61,36 @@ detect_system() {
     fi
 }
 
-# 更新系统
-update_system() {
+# 修复Debian源配置
+fix_debian_sources() {
+    log_step "检查并修复Debian软件源配置..."
+    
+    if [[ "$ID" == "debian" ]]; then
+        # 检查是否是bullseye版本且有源问题
+        if grep -q "bullseye/updates" /etc/apt/sources.list* 2>/dev/null; then
+            log_info "检测到Debian bullseye源配置问题，正在修复..."
+            
+            # 备份原始sources.list
+            sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d_%H%M%S)
+            
+            # 修复bullseye源配置
+            sudo sed -i 's|bullseye/updates|bullseye-security|g' /etc/apt/sources.list
+            sudo sed -i 's|security.debian.org|security.debian.org/debian-security|g' /etc/apt/sources.list
+            
+            # 如果存在sources.list.d目录下的文件也需要修复
+            if ls /etc/apt/sources.list.d/*.list >/dev/null 2>&1; then
+                sudo sed -i 's|bullseye/updates|bullseye-security|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+                sudo sed -i 's|security.debian.org|security.debian.org/debian-security|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            fi
+            
+            log_info "Debian源配置已修复"
+        fi
+        
+        # 清理apt缓存并重新更新
+        sudo apt clean
+        sudo apt update --fix-missing -y
+    fi
+}
     log_step "更新系统软件包..."
     sudo apt update && sudo apt upgrade -y
     log_info "系统更新完成"
@@ -301,6 +329,8 @@ main() {
     echo "  • 彩色命令行配置"
     echo
     
+    fix_debian_sources
+    echo
     update_system
     echo
     install_packages
