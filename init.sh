@@ -2,7 +2,7 @@
 
 # Linux系统初始化脚本 - 支持Ubuntu和Debian
 # 作者: doubleDimple
-# 功能: 安装必要组件、设置上海时区、配置彩色命令行
+# 功能: 修复源配置、安装必要组件、设置上海时区、配置彩色命令行、安装Docker
 
 set -e  # 遇到错误时退出
 
@@ -61,78 +61,12 @@ detect_system() {
     fi
 }
 
-# 检测网络环境并选择最佳镜像源
-detect_best_mirror() {
-    log_info "检测网络环境，选择最佳镜像源..."
-    
-    # 测试不同镜像源的连通性和速度
-    local mirrors=(
-        "http://deb.debian.org/debian"           # 官方源
-        "http://mirrors.aliyun.com/debian"       # 阿里云（中国）
-        "http://mirrors.tuna.tsinghua.edu.cn/debian"  # 清华大学（中国）
-        "http://mirror.sjtu.edu.cn/debian"       # 上海交大（中国）
-        "http://ftp.us.debian.org/debian"        # 美国镜像
-        "http://ftp.de.debian.org/debian"        # 德国镜像
-    )
-    
-    local security_mirrors=(
-        "http://security.debian.org/debian-security"        # 官方安全源
-        "http://mirrors.aliyun.com/debian-security"         # 阿里云安全源
-        "http://mirrors.tuna.tsinghua.edu.cn/debian-security" # 清华安全源
-    )
-    
-    local best_mirror=""
-    local best_security=""
-    local fastest_time=999999
-    
-    for mirror in "${mirrors[@]}"; do
-        log_info "测试镜像源: $mirror"
-        local start_time=$(date +%s%N)
-        if timeout 10 curl -s --head "$mirror/ls-lR.gz" > /dev/null 2>&1; then
-            local end_time=$(date +%s%N)
-            local response_time=$(( (end_time - start_time) / 1000000 ))
-            log_info "响应时间: ${response_time}ms"
-            
-            if [ $response_time -lt $fastest_time ]; then
-                fastest_time=$response_time
-                best_mirror="$mirror"
-                
-                # 根据选择的主镜像确定对应的安全镜像
-                case "$mirror" in
-                    *aliyun*)
-                        best_security="http://mirrors.aliyun.com/debian-security"
-                        ;;
-                    *tuna*)
-                        best_security="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
-                        ;;
-                    *)
-                        best_security="http://security.debian.org/debian-security"
-                        ;;
-                esac
-            fi
-        else
-            log_warn "镜像源不可达: $mirror"
-        fi
-    done
-    
-    if [ -z "$best_mirror" ]; then
-        log_warn "所有镜像源测试失败，使用默认官方源"
-        best_mirror="http://deb.debian.org/debian"
-        best_security="http://security.debian.org/debian-security"
-    else
-        log_info "选择最佳镜像源: $best_mirror (${fastest_time}ms)"
-        log_info "对应安全源: $best_security"
-    fi
-    
-    echo "$best_mirror|$best_security"
-}
-
 # 修复Debian源配置
 fix_debian_sources() {
-    log_step "检查并修复Debian软件源配置..."
+    log_step "修复Debian软件源配置..."
     
     if [[ "$ID" == "debian" ]]; then
-        log_info "检测到Debian系统，配置最优镜像源..."
+        log_info "检测到Debian系统，修复源配置..."
         
         # 备份原始sources.list
         if [[ -f /etc/apt/sources.list ]]; then
@@ -144,28 +78,23 @@ fix_debian_sources() {
         VERSION_CODENAME=$(lsb_release -cs)
         log_info "检测到Debian版本: $VERSION_CODENAME"
         
-        # 检测最佳镜像源
-        local mirror_result=$(detect_best_mirror)
-        local best_mirror=$(echo "$mirror_result" | cut -d'|' -f1)
-        local best_security=$(echo "$mirror_result" | cut -d'|' -f2)
-        
-        # 配置sources.list
-        log_info "配置Debian镜像源..."
-        cat <<EOF | sudo tee /etc/apt/sources.list > /dev/null
-# Debian $VERSION_CODENAME repositories - 自动选择最优镜像源
-deb $best_mirror $VERSION_CODENAME main contrib non-free
-deb-src $best_mirror $VERSION_CODENAME main contrib non-free
+        # 配置正确的sources.list
+        log_info "配置Debian官方镜像源..."
+        sudo tee /etc/apt/sources.list > /dev/null <<EOF
+# Debian $VERSION_CODENAME repositories
+deb http://deb.debian.org/debian $VERSION_CODENAME main contrib non-free
+deb-src http://deb.debian.org/debian $VERSION_CODENAME main contrib non-free
 
 # Debian $VERSION_CODENAME updates
-deb $best_mirror $VERSION_CODENAME-updates main contrib non-free
-deb-src $best_mirror $VERSION_CODENAME-updates main contrib non-free
+deb http://deb.debian.org/debian $VERSION_CODENAME-updates main contrib non-free
+deb-src http://deb.debian.org/debian $VERSION_CODENAME-updates main contrib non-free
 
-# Debian $VERSION_CODENAME security updates
-deb $best_security $VERSION_CODENAME-security main contrib non-free
-deb-src $best_security $VERSION_CODENAME-security main contrib non-free
+# Debian $VERSION_CODENAME security updates (修复格式)
+deb http://security.debian.org/debian-security $VERSION_CODENAME-security main contrib non-free
+deb-src http://security.debian.org/debian-security $VERSION_CODENAME-security main contrib non-free
 EOF
         
-        log_info "已配置最优镜像源"
+        log_info "已修复Debian源配置"
         
         # 清理并更新
         sudo apt clean
@@ -173,6 +102,9 @@ EOF
         log_info "软件源更新完成"
     fi
 }
+
+# 更新系统
+update_system() {
     log_step "更新系统软件包..."
     sudo apt update && sudo apt upgrade -y
     log_info "系统更新完成"
@@ -383,6 +315,7 @@ show_completion() {
     log_info "======================================"
     echo
     log_info "已完成的配置:"
+    echo "  ✓ Debian软件源修复"
     echo "  ✓ 系统软件包更新"
     echo "  ✓ 必要组件安装"
     echo "  ✓ Docker安装"
@@ -420,6 +353,7 @@ main() {
     
     echo
     log_info "将自动执行以下操作:"
+    echo "  • 修复Debian软件源配置"
     echo "  • 系统软件包更新"
     echo "  • 必要组件安装"
     echo "  • Docker安装"
