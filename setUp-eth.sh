@@ -1,5 +1,7 @@
 #!/bin/bash
 
+sudo apt install -y jq
+
 set -e
 
 echo "获取 VNIC 元数据..."
