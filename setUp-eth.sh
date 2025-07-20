@@ -67,24 +67,6 @@ for i in $(seq 1 $((count - 1))); do
 
   echo "  ✅ IPv4 配置完成"
 
-  ### IPv6 配置 ###
-  if [[ "$ip6" != "null" && "$subnet6" != "null" && "$gateway6" != "null" ]]; then
-    echo "  🌈 IPv6 地址: $ip6"
-    echo "  🌐 IPv6 子网段: $subnet6"
-    echo "  🚪 IPv6 网关:   $gateway6"
-
-    sudo ip -6 addr add "$ip6/64" dev "$iface" || true
-    # 启动接口（已启动无妨）
-    sudo ip link set "$iface" up
-
-    # 默认 IPv6 路由 metric 设置较高，防止覆盖 eth0 默认路由
-    sudo ip -6 route add default via "$gateway6" dev "$iface" metric 100 || true
-
-    echo "  ✅ IPv6 配置完成"
-  else
-    echo "  ⚠️ 无有效 IPv6 信息，跳过 IPv6 配置"
-  fi
-
   # 路由表编号递增
   table_id=$((table_id + 1))
 done
