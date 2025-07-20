@@ -23,8 +23,8 @@ for i in $(seq 1 $((count - 1))); do
   mac=$(echo "$vnics" | jq -r ".[$i].macAddr" | tr '[:upper:]' '[:lower:]')
 
   # 查找接口名（更健壮）
-  iface=$(ip -o link | awk -F': ' '{print $2}' | while read line; do
-    ip link show "$line" | grep -qi "$mac" && echo "$line" && break
+  iface=$(ip -o link | awk -F': ' '{print $2}' | sed 's/@.*//' | while read line; do
+  ip link show "$line" | grep -qi "$mac" && echo "$line" && break
   done)
 
   if [ -z "$iface" ]; then
