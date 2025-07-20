@@ -20,3 +20,9 @@ wget -O upgrade_and_init.sh https://raw.githubusercontent.com/doubleDimple/shell
 chmod +x upgrade_and_init.sh && \
 ./upgrade_and_init.sh
 EOF
+
+
+setup,sh使用流程
+wget -O setUp-eth.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/setUp-eth.sh && chmod +x setUp-eth.sh
+运行:
+./setUp-eth.sh
