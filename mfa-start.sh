@@ -1,32 +1,5 @@
 #!/bin/bash
 
-#1. 启动应用
-# ./mfa-start.sh start
-
-#2. 停止应用
-#./mfa-start.sh stop
-
-#3. 重启应用
-#./mfa-start.sh restart
-
-#4. 查看状态
-#./mfa-start.sh status
-
-#5. 更新应用
-#./mfa-start.sh update
-
-#6. 查看当前凭据
-#./mfa-start.sh password 或者 ./mfa-start.sh passwd
-
-#7. 修改用户名和密码
-# 同时修改用户名和密码
-#./mfa-start.sh password admin mypassword123
-# 只修改用户名（保持原密码）
-#./mfa-start.sh password newadmin
-# 只修改密码（保持原用户名）
-#./mfa-start.sh password "" newpassword456
-
-
 # 配置变量
 BASE_DIR="/root/mfa-start"
 JAR_PATH="$BASE_DIR/mfa-start-release.jar"
@@ -35,7 +8,7 @@ PASSWORD_FILE="$BASE_DIR/.mfa-password"
 
 # 下载链接配置
 JAR_DOWNLOAD_URL="https://github.com/doubleDimple/mfa-start/releases/latest/download/mfa-start-release.jar"
-CONFIG_DOWNLOAD_URL="https://raw.githubusercontent.com/doubleDimple/shell-tools/master/mfa-start.yml"
+CONFIG_DOWNLOAD_URL="https://github.com/doubleDimple/mfa-start/releases/latest/download/mfa-start.yml"
 
 # 创建基础目录
 create_base_dir() {
@@ -120,10 +93,15 @@ init_config() {
         # 如果有密码文件，读取现有密码
         if [ -f "$PASSWORD_FILE" ]; then
             password=$(cat "$PASSWORD_FILE")
+            username=$(grep -A3 "security:" "$CONFIG_FILE" | grep "name:" | awk '{print $2}')
+            if [ -z "$username" ]; then
+                username="mfa-start-user"
+            fi
             echo "Using existing credentials for user: $username"
         else
             # 如果只有配置文件没有密码文件，从配置文件读取密码
             if [ -f "$CONFIG_FILE" ]; then
+                username=$(grep -A3 "security:" "$CONFIG_FILE" | grep "name:" | awk '{print $2}')
                 password=$(grep -A4 "security:" "$CONFIG_FILE" | grep "password:" | awk '{print $2}')
                 if [ -n "$password" ]; then
                     echo "$password" > "$PASSWORD_FILE"
@@ -139,9 +117,20 @@ init_config() {
 
     # 创建或更新配置文件
     if [ -f "$CONFIG_FILE.template" ]; then
-        # 使用模板并替换用户名密码
-        sed -e "s/{{USERNAME}}/$username/g" -e "s/{{PASSWORD}}/$password/g" "$CONFIG_FILE.template" > "$CONFIG_FILE"
+        # 读取模板内容并替换占位符
+        cp "$CONFIG_FILE.template" "$CONFIG_FILE.tmp"
+        
+        # 替换用户名和密码占位符
+        sed -i "s/{{USERNAME}}/$username/g" "$CONFIG_FILE.tmp"
+        sed -i "s/{{PASSWORD}}/$password/g" "$CONFIG_FILE.tmp"
+        
+        # 如果模板中没有占位符，直接修改name和password字段
+        sed -i "s/name:.*/name: $username/g" "$CONFIG_FILE.tmp"
+        sed -i "s/password:.*/password: $password/g" "$CONFIG_FILE.tmp"
+        
+        mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
         rm -f "$CONFIG_FILE.template"
+        echo "Configuration file created from template with credentials"
     else
         # 创建默认配置文件
         cat > "$CONFIG_FILE" << EOF
@@ -187,13 +176,25 @@ update_config() {
     # 如果有新的配置模板，使用现有用户名密码更新
     if [ -f "$CONFIG_FILE.template" ]; then
         echo "Updating configuration with new template (preserving credentials)..."
-        sed -e "s/{{USERNAME}}/$existing_username/g" -e "s/{{PASSWORD}}/$existing_password/g" "$CONFIG_FILE.template" > "$CONFIG_FILE.new"
-
-        # 如果新配置文件创建成功，替换旧的
-        if [ -f "$CONFIG_FILE.new" ]; then
-            mv "$CONFIG_FILE.new" "$CONFIG_FILE"
+        
+        # 创建临时文件
+        cp "$CONFIG_FILE.template" "$CONFIG_FILE.tmp"
+        
+        # 替换占位符或直接修改字段
+        sed -i "s/{{USERNAME}}/$existing_username/g" "$CONFIG_FILE.tmp"
+        sed -i "s/{{PASSWORD}}/$existing_password/g" "$CONFIG_FILE.tmp"
+        sed -i "s/name:.*/name: $existing_username/g" "$CONFIG_FILE.tmp"
+        sed -i "s/password:.*/password: $existing_password/g" "$CONFIG_FILE.tmp"
+        
+        # 替换配置文件
+        if [ -f "$CONFIG_FILE.tmp" ]; then
+            mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
             rm -f "$CONFIG_FILE.template"
             echo "Configuration updated with new template (credentials preserved)"
+            
+            # 更新密码文件
+            echo "$existing_password" > "$PASSWORD_FILE"
+            chmod 600 "$PASSWORD_FILE"
         else
             echo "Failed to create new configuration, keeping existing one"
             rm -f "$CONFIG_FILE.template"
@@ -207,15 +208,29 @@ update_config() {
 ensure_files() {
     create_base_dir
 
+    # 先确保JAR文件存在
     if [ ! -f "$JAR_PATH" ]; then
         echo "JAR file not found, downloading..."
         download_jar || exit 1
     fi
 
+    # 再检查配置文件
     if [ ! -f "$CONFIG_FILE" ]; then
         echo "Configuration file not found, initializing..."
-        download_config_template  # 尝试下载模板，失败也没关系
+        # 尝试下载配置模板
+        download_config_template
+        # 初始化配置（会生成用户名密码并写入配置文件）
         init_config
+    else
+        # 如果配置文件存在但密码文件不存在，从配置文件提取密码
+        if [ ! -f "$PASSWORD_FILE" ]; then
+            password=$(grep -A4 "security:" "$CONFIG_FILE" | grep "password:" | awk '{print $2}')
+            if [ -n "$password" ]; then
+                echo "$password" > "$PASSWORD_FILE"
+                chmod 600 "$PASSWORD_FILE"
+                echo "Password file created from existing config"
+            fi
+        fi
     fi
 }
 
