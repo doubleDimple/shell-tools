@@ -434,20 +434,50 @@ change_credentials() {
     local current_username=$(grep -A3 "security:" "$CONFIG_FILE" | grep "name:" | awk '{print $2}')
     local current_password=$(grep -A4 "security:" "$CONFIG_FILE" | grep "password:" | awk '{print $2}')
 
-    # 确定新的用户名和密码
-    local final_username="${new_username:-$current_username}"
-    local final_password="${new_password:-$current_password}"
+    # 调试信息
+    echo "Debug: Current username from config: '$current_username'"
+    echo "Debug: New username parameter: '$new_username'"
+    echo "Debug: New password parameter: '$new_password'"
 
-    # 如果没有提供密码且当前配置中也没有密码，则生成新密码
-    if [ -z "$final_password" ]; then
-        final_password=$(generate_password)
-        echo "No password provided, generated new password: $final_password"
+    # 确定新的用户名和密码
+    local final_username
+    local final_password
+    
+    # 处理用户名
+    if [ "$new_username" = "" ]; then
+        # 空字符串表示保持当前用户名
+        final_username="$current_username"
+        echo "Keeping current username: $final_username"
+    elif [ -z "$new_username" ]; then
+        # 真正的空值（没有提供参数）
+        final_username="$current_username"
+    else
+        # 提供了新用户名
+        final_username="$new_username"
+    fi
+    
+    # 处理密码
+    if [ -z "$new_password" ]; then
+        # 没有提供密码参数，保持当前密码
+        final_password="$current_password"
+        echo "Keeping current password"
+    else
+        # 提供了新密码
+        final_password="$new_password"
+        echo "Setting new password"
     fi
 
+    # 如果最终密码仍为空，生成新密码
+    if [ -z "$final_password" ]; then
+        final_password=$(generate_password)
+        echo "No password found, generated new password: $final_password"
+    fi
+
+    echo ""
     echo "Updating credentials..."
     echo "Old username: $current_username"
     echo "New username: $final_username"
-    echo "Password: [UPDATED]"
+    echo "Password will be updated"
 
     # 检查应用是否正在运行
     local was_running=false
@@ -457,23 +487,52 @@ change_credentials() {
         stop
     fi
 
-    # 更新配置文件中的用户名和密码
-    sed -i "s/name:.*/name: $final_username/" "$CONFIG_FILE"
-    sed -i "s/password:.*/password: $final_password/" "$CONFIG_FILE"
+    # 创建临时配置文件
+    cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+    
+    # 使用更精确的sed命令更新配置文件
+    # 先找到security部分，然后更新name和password
+    awk -v user="$final_username" -v pass="$final_password" '
+        /^spring:/ { spring=1 }
+        /^  security:/ && spring { security=1 }
+        /^    user:/ && security { user_section=1 }
+        /^      name:/ && user_section { 
+            print "      name: " user
+            next
+        }
+        /^      password:/ && user_section { 
+            print "      password: " pass
+            next
+        }
+        { print }
+    ' "$CONFIG_FILE.bak" > "$CONFIG_FILE"
 
-    # 更新密码文件
-    echo "$final_password" > "$PASSWORD_FILE"
-    chmod 600 "$PASSWORD_FILE"
-
-    echo "========================================="
-    echo "CREDENTIALS UPDATED SUCCESSFULLY"
-    echo "========================================="
-    echo "Username: $final_username"
-    echo "Password: $final_password"
-    echo "========================================="
-    echo "Credentials saved to configuration file"
-    echo "Password also saved to: $PASSWORD_FILE"
-    echo "========================================="
+    # 验证更新是否成功
+    local new_config_username=$(grep -A3 "security:" "$CONFIG_FILE" | grep "name:" | awk '{print $2}')
+    local new_config_password=$(grep -A4 "security:" "$CONFIG_FILE" | grep "password:" | awk '{print $2}')
+    
+    if [ "$new_config_username" = "$final_username" ] && [ "$new_config_password" = "$final_password" ]; then
+        echo "Configuration file updated successfully"
+        rm -f "$CONFIG_FILE.bak"
+        
+        # 更新密码文件
+        echo "$final_password" > "$PASSWORD_FILE"
+        chmod 600 "$PASSWORD_FILE"
+        
+        echo "========================================="
+        echo "CREDENTIALS UPDATED SUCCESSFULLY"
+        echo "========================================="
+        echo "Username: $final_username"
+        echo "Password: $final_password"
+        echo "========================================="
+        echo "Credentials saved to configuration file"
+        echo "Password also saved to: $PASSWORD_FILE"
+        echo "========================================="
+    else
+        echo "Error: Failed to update configuration file"
+        mv "$CONFIG_FILE.bak" "$CONFIG_FILE"
+        exit 1
+    fi
 
     # 如果之前在运行，重新启动应用
     if [ "$was_running" = true ]; then
