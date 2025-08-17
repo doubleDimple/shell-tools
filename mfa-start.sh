@@ -68,6 +68,8 @@ download_config_template() {
     fi
 }
 
+
+
 # 初始化配置文件（仅首次安装）
 init_config() {
     local username="mfa-start-user"
@@ -338,6 +340,10 @@ update() {
         download_config_template  # 尝试下载新模板
         update_config
 
+        # 清理备份文件（更新成功后）
+        rm -f "$JAR_PATH.backup."*
+        echo "Backup files cleaned up after successful update"
+
         # 如果之前在运行，则重新启动
         if [ "$was_running" = true ]; then
             echo "Restarting application with updated files..."
@@ -545,46 +551,42 @@ change_credentials() {
 
 # 显示帮助信息
 show_help() {
-    echo "========================================="
-    echo "MFA-START 应用管理脚本 / MFA-START Application Management Script"
-    echo "========================================="
+    echo "Usage: $0 {start|stop|restart|update|status|password|help}"
     echo ""
-    echo "用法 / Usage: $0 {start|stop|restart|update|status|password|help}"
+    echo "Commands:"
+    echo "  start                              - Start the application (auto-download if needed)"
+    echo "  stop                               - Stop the application"
+    echo "  restart                            - Restart the application"
+    echo "  update                             - Update JAR package and restart if running"
+    echo "  status                             - Show application status"
+    echo "  password                           - Show current username and password"
+    echo "  password <username> <password>     - Change both username and password"
+    echo "  password <username>                - Change only username (keep current password)"
+    echo "  password \"\" <password>             - Change only password (keep current username)"
+    echo "  help                               - Show this help message"
     echo ""
-    echo "命令说明 / Commands:"
-    echo "  start                              - 启动应用 (如需要会自动下载) / Start the application (auto-download if needed)"
-    echo "  stop                               - 停止应用 / Stop the application"
-    echo "  restart                            - 重启应用 / Restart the application"
-    echo "  update                             - 更新JAR包并重启 (如果正在运行) / Update JAR package and restart if running"
-    echo "  status                             - 显示应用状态 / Show application status"
-    echo "  password                           - 显示当前用户名和密码 / Show current username and password"
-    echo "  password <username> <password>     - 修改用户名和密码 / Change both username and password"
-    echo "  password <username>                - 仅修改用户名 (保持当前密码) / Change only username (keep current password)"
-    echo "  password \"\" <password>             - 仅修改密码 (保持当前用户名) / Change only password (keep current username)"
-    echo "  help                               - 显示此帮助信息 / Show this help message"
+    echo "Examples:"
+    echo "  $0 start                           - Start application"
+    echo "  $0 password                        - View credentials"
+    echo "  $0 password admin newpass123       - Set username to 'admin' and password to 'newpass123'"
+    echo "  $0 password newuser                - Change username to 'newuser', keep current password"
+    echo "  $0 password \"\" secretpass          - Keep current username, change password to 'secretpass'"
+    echo "  $0 update                          - Update to latest version"
     echo ""
-    echo "使用示例 / Examples:"
-    echo "  $0 start                           - 启动应用 / Start application"
-    echo "  $0 password                        - 查看凭据 / View credentials"
-    echo "  $0 password admin newpass123       - 设置用户名为'admin'，密码为'newpass123' / Set username to 'admin' and password to 'newpass123'"
-    echo "  $0 password newuser                - 将用户名改为'newuser'，保持当前密码 / Change username to 'newuser', keep current password"
-    echo "  $0 password \"\" secretpass          - 保持当前用户名，密码改为'secretpass' / Keep current username, change password to 'secretpass'"
-    echo "  $0 update                          - 更新到最新版本 / Update to latest version"
+    echo "First Run Features:"
+    echo "  - Create user 'mfa-start-user' with random password"
+    echo "  - Auto-download latest JAR and config files"
+    echo "  - Display generated login credentials"
     echo ""
-    echo "首次运行特性 / First Run Features:"
-    echo "  - 创建用户 'mfa-start-user' 并生成随机密码 / Create user 'mfa-start-user' with random password"
-    echo "  - 自动下载最新的JAR包和配置文件 / Auto-download latest JAR and config files"
-    echo "  - 显示生成的登录凭据 / Display generated login credentials"
+    echo "File Locations:"
+    echo "  JAR File:        $JAR_PATH"
+    echo "  Config File:     $CONFIG_FILE"
+    echo "  Password File:   $PASSWORD_FILE"
     echo ""
-    echo "文件位置 / File Locations:"
-    echo "  JAR文件 / JAR File:        $JAR_PATH"
-    echo "  配置文件 / Config File:    $CONFIG_FILE"
-    echo "  密码文件 / Password File:  $PASSWORD_FILE"
-    echo ""
-    echo "注意事项 / Notes:"
-    echo "  - 修改凭据时会自动重启应用 (如果正在运行) / Credential changes will restart the app (if running)"
-    echo "  - 更新功能会保持现有用户名和密码不变 / Update function preserves existing username and password"
-    echo "========================================="
+    echo "Notes:"
+    echo "  - Credential changes will restart the app (if running)"
+    echo "  - Update function preserves existing username and password"
+    echo "  - Backup files are automatically cleaned up after successful updates"
 }
 
 # 主命令处理
