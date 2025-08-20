@@ -1,46 +1,80 @@
 #!/bin/bash
-# 修复 Containerd 配置并重新初始化集群
+# 诊断并修复 Containerd CRI 问题
 set -e
 
-echo "🔧 修复 Containerd 配置..."
+echo "🔍 步骤1: 诊断当前状态..."
 
-# 停止相关服务
+echo "检查 containerd 服务状态:"
+systemctl status containerd --no-pager || true
+
+echo -e "\n检查 containerd 配置文件:"
+if [ -f /etc/containerd/config.toml ]; then
+    echo "配置文件存在，检查 CRI 插件配置:"
+    grep -n "disabled_plugins" /etc/containerd/config.toml || echo "未找到 disabled_plugins 配置"
+    grep -n "SystemdCgroup" /etc/containerd/config.toml || echo "未找到 SystemdCgroup 配置"
+else
+    echo "配置文件不存在!"
+fi
+
+echo -e "\n检查 containerd 进程:"
+ps aux | grep containerd | grep -v grep || echo "containerd 进程未运行"
+
+echo -e "\n🛠️ 步骤2: 彻底重新安装并配置 containerd..."
+
+# 停止所有相关服务
 systemctl stop kubelet 2>/dev/null || true
-systemctl stop containerd
+systemctl stop containerd 2>/dev/null || true
 
-# 清理可能的旧配置
+# 完全清理
 kubeadm reset -f 2>/dev/null || true
+apt remove --purge -y containerd 2>/dev/null || true
+rm -rf /etc/containerd
+rm -rf /var/lib/containerd
+rm -rf /run/containerd
 
-# 重新配置 containerd
-echo "重新配置 containerd..."
-rm -f /etc/containerd/config.toml
+echo "重新安装 containerd..."
+apt update
+apt install -y containerd
 
-# 生成新的默认配置
+echo "创建正确的 containerd 配置..."
 mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
 
-# 修改配置启用 CRI 插件并使用 systemd cgroup
-sed -i 's/disabled_plugins = \["cri"\]/disabled_plugins = []/' /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+# 创建一个简化但正确的配置
+cat > /etc/containerd/config.toml << 'EOF'
+version = 2
 
-# 重启 containerd
-systemctl restart containerd
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
+
+[plugins."io.containerd.grpc.v1.cri".cni]
+  bin_dir = "/opt/cni/bin"
+  conf_dir = "/etc/cni/net.d"
+EOF
+
+echo "启动 containerd..."
+systemctl daemon-reload
 systemctl enable containerd
+systemctl start containerd
 
-# 验证 containerd 状态
+# 等待服务启动
+sleep 5
+
 echo "验证 containerd 状态..."
-sleep 3
 systemctl status containerd --no-pager
 
-# 测试 CRI 连接
-echo "测试 CRI 连接..."
+echo "测试 CRI 接口..."
 crictl --runtime-endpoint unix:///run/containerd/containerd.sock version
 
-echo "✅ Containerd 配置修复完成!"
-echo ""
-echo "🚀 重新初始化 Kubernetes 集群..."
+echo -e "\n✅ Containerd 配置完成!"
+echo -e "\n🚀 步骤3: 重新初始化 Kubernetes 集群..."
 
-# 重新初始化集群
+# 重新初始化
 kubeadm init --pod-network-cidr=10.244.0.0/16 --cri-socket unix:///run/containerd/containerd.sock
 
 # 配置 kubectl
@@ -48,29 +82,22 @@ mkdir -p $HOME/.kube
 cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 chown $(id -u):$(id -g) $HOME/.kube/config
 
-echo "安装 Flannel 网络插件..."
+echo "安装网络插件..."
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
-echo "安装 KubeSphere..."
-# 等待节点就绪
+echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s
 
-# 安装 KubeSphere
+echo "安装 KubeSphere..."
 kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/kubesphere-installer.yaml
 kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/cluster-configuration.yaml
 
-echo ""
-echo "✅ 安装完成！"
-echo ""
-echo "🔑 Worker 节点加入命令："
+echo -e "\n🎉 安装完成!"
+echo -e "\n🔑 Worker 节点加入命令:"
 echo "================================================================"
 kubeadm token create --print-join-command
 echo "================================================================"
-echo ""
-echo "📊 KubeSphere 控制台："
+echo -e "\n📊 KubeSphere 控制台:"
 echo "地址: http://$(hostname -I | awk '{print $1}'):30880"
 echo "用户: admin"
 echo "密码: P@88w0rd"
-echo ""
-echo "🔍 查看安装进度："
-echo "kubectl logs -n kubesphere-system deployment/ks-installer -f"
