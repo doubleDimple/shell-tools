@@ -18,47 +18,52 @@
 
 ## 🔧 安装步骤
 
-### 第一步：在 Master 节点执行
+### 1️⃣ Master 节点
+
+在 **Master 节点** 上执行：
 
 ```bash
 chmod +x install-master.sh
 ./install-master.sh
 
-第二步：保存 join 命令
+2️⃣ 保存 Join 命令
 
-脚本执行完会打印出类似命令，请保存，Worker 节点加入时需要用到：
+脚本执行完成后会打印出类似命令，请保存（Worker 节点加入时使用）：
 
 kubeadm join 192.168.0.10:6443 --token abcdef.0123456789abcdef \
     --discovery-token-ca-cert-hash sha256:xxxxxxxx
 
-第三步：在每台 Worker 节点上执行
+3️⃣ Worker 节点
+
+在每台 Worker 节点 上执行：
+
 chmod +x install-worker.sh
 ./install-worker.sh
 
-第四步：执行 Master 节点给出的 join 命令
+4️⃣ 节点加入集群
 
-例如：
+在 Worker 节点 执行 Master 节点生成的 join 命令，例如：
 
 kubeadm join 192.168.0.10:6443 --token abcdef.0123456789abcdef \
     --discovery-token-ca-cert-hash sha256:xxxxxxxx
 
-第五步：验证集群是否成功
+5️⃣ 验证集群状态
 
-在 Master 节点执行：
+在 Master 节点 执行：
 
 kubectl get nodes
 
 
-你应该看到类似结果：
+你应该看到类似输出：
 
 NAME               STATUS   ROLES           AGE     VERSION
 master-node        Ready    control-plane   15m     v1.29.x
 worker-node-1      Ready    <none>          5m      v1.29.x
 worker-node-2      Ready    <none>          3m      v1.29.x
 
-第六步：访问 KubeSphere 面板
+6️⃣ 访问 KubeSphere 控制台
 
-查看 KubeSphere 控制台服务：
+查看控制台服务：
 
 kubectl get svc -n kubesphere-system
 
@@ -68,9 +73,9 @@ kubectl get svc -n kubesphere-system
 NAME          TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
 ks-console    NodePort   10.96.34.5      <none>        30880:30880/TCP  10m
 
-第七步：浏览器访问
+7️⃣ 登录控制台
 
-在浏览器中访问：
+在浏览器访问：
 
 http://<Master 节点 IP>:30880
 
