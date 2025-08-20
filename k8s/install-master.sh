@@ -1,103 +1,115 @@
 #!/bin/bash
-# 诊断并修复 Containerd CRI 问题
+# 使用 Docker 作为容器运行时的 Kubernetes 安装脚本
 set -e
 
-echo "🔍 步骤1: 诊断当前状态..."
+echo "🔄 切换到 Docker 容器运行时..."
 
-echo "检查 containerd 服务状态:"
-systemctl status containerd --no-pager || true
-
-echo -e "\n检查 containerd 配置文件:"
-if [ -f /etc/containerd/config.toml ]; then
-    echo "配置文件存在，检查 CRI 插件配置:"
-    grep -n "disabled_plugins" /etc/containerd/config.toml || echo "未找到 disabled_plugins 配置"
-    grep -n "SystemdCgroup" /etc/containerd/config.toml || echo "未找到 SystemdCgroup 配置"
-else
-    echo "配置文件不存在!"
-fi
-
-echo -e "\n检查 containerd 进程:"
-ps aux | grep containerd | grep -v grep || echo "containerd 进程未运行"
-
-echo -e "\n🛠️ 步骤2: 彻底重新安装并配置 containerd..."
-
-# 停止所有相关服务
+# 清理之前的安装
+echo "清理之前的配置..."
 systemctl stop kubelet 2>/dev/null || true
 systemctl stop containerd 2>/dev/null || true
-
-# 完全清理
 kubeadm reset -f 2>/dev/null || true
+
+# 卸载 containerd
 apt remove --purge -y containerd 2>/dev/null || true
 rm -rf /etc/containerd
-rm -rf /var/lib/containerd
-rm -rf /run/containerd
 
-echo "重新安装 containerd..."
+echo "[1/6] 安装 Docker..."
+# 安装 Docker
 apt update
-apt install -y containerd
+apt install -y ca-certificates curl gnupg lsb-release
 
-echo "创建正确的 containerd 配置..."
-mkdir -p /etc/containerd
+# 添加 Docker 官方 GPG 密钥
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-# 创建一个简化但正确的配置
-cat > /etc/containerd/config.toml << 'EOF'
-version = 2
+# 设置 Docker 仓库
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-[plugins]
-  [plugins."io.containerd.grpc.v1.cri"]
-    [plugins."io.containerd.grpc.v1.cri".containerd]
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
-        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-          runtime_type = "io.containerd.runc.v2"
-          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-            SystemdCgroup = true
+# 安装 Docker Engine
+apt update
+apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-[plugins."io.containerd.grpc.v1.cri".cni]
-  bin_dir = "/opt/cni/bin"
-  conf_dir = "/etc/cni/net.d"
+# 启动 Docker
+systemctl enable docker
+systemctl start docker
+
+echo "[2/6] 配置 Docker 为 systemd cgroup..."
+# 配置 Docker 使用 systemd cgroup 驱动
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'EOF'
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
 EOF
 
-echo "启动 containerd..."
+# 重启 Docker
 systemctl daemon-reload
-systemctl enable containerd
-systemctl start containerd
+systemctl restart docker
 
-# 等待服务启动
-sleep 5
+echo "[3/6] 配置内核参数..."
+# 确保必要的内核模块已加载
+modprobe overlay
+modprobe br_netfilter
 
-echo "验证 containerd 状态..."
-systemctl status containerd --no-pager
+cat <<EOF | tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
 
-echo "测试 CRI 接口..."
-crictl --runtime-endpoint unix:///run/containerd/containerd.sock version
+cat <<EOF | tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
 
-echo -e "\n✅ Containerd 配置完成!"
-echo -e "\n🚀 步骤3: 重新初始化 Kubernetes 集群..."
+sysctl --system
 
-# 重新初始化
-kubeadm init --pod-network-cidr=10.244.0.0/16 --cri-socket unix:///run/containerd/containerd.sock
+echo "[4/6] 验证 Docker 状态..."
+docker version
+systemctl status docker --no-pager
+
+echo "[5/6] 初始化 Kubernetes 集群..."
+# 使用 Docker 作为容器运行时初始化集群
+kubeadm init --pod-network-cidr=10.244.0.0/16 --cri-socket unix:///var/run/cri-dockerd.sock 2>/dev/null || \
+kubeadm init --pod-network-cidr=10.244.0.0/16
 
 # 配置 kubectl
 mkdir -p $HOME/.kube
 cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 chown $(id -u):$(id -g) $HOME/.kube/config
 
-echo "安装网络插件..."
+echo "[6/6] 安装网络插件和 KubeSphere..."
+# 安装 Flannel
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
+# 等待节点就绪
 echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s
 
-echo "安装 KubeSphere..."
+# 安装 KubeSphere
 kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/kubesphere-installer.yaml
 kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/cluster-configuration.yaml
 
-echo -e "\n🎉 安装完成!"
-echo -e "\n🔑 Worker 节点加入命令:"
+echo ""
+echo "🎉 安装完成！"
+echo ""
+echo "🔑 Worker 节点加入命令："
 echo "================================================================"
 kubeadm token create --print-join-command
 echo "================================================================"
-echo -e "\n📊 KubeSphere 控制台:"
+echo ""
+echo "📊 KubeSphere 控制台："
 echo "地址: http://$(hostname -I | awk '{print $1}'):30880"
-echo "用户: admin"
+echo "用户: admin"  
 echo "密码: P@88w0rd"
+echo ""
+echo "🔍 查看 KubeSphere 安装进度："
+echo "kubectl logs -n kubesphere-system deployment/ks-installer -f"
+echo ""
+echo "⚠️  注意：KubeSphere 完全启动需要 5-10 分钟，请耐心等待。"
