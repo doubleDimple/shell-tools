@@ -19,7 +19,8 @@
 在 **Master 节点** 上执行：
 
 ```bash
-chmod +x install-master.sh
+下载脚本
+wget -O install-master.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/k8s/install-master.sh && chmod +x install-master.sh
 ./install-master.sh
 ```
 
@@ -37,7 +38,7 @@ kubeadm join 192.168.0.10:6443 --token abcdef.0123456789abcdef \
 在每台 **Worker 节点** 上执行：
 
 ```bash
-chmod +x install-worker.sh
+wget -O install-worker.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/k8s/install-worker.sh && chmod +x install-worker.sh
 ./install-worker.sh
 ```
 
