@@ -88,16 +88,15 @@ detect_os() {
 # 强制清理所有 Kubernetes 相关组件
 force_cleanup() {
     echo ""
-    echo "🧹 [1/12] 强制清理所有 Kubernetes 组件..."
+    echo "🧹 [1/13] 强制清理所有 Kubernetes 组件..."
     
-    # 停止所有相关服务
+    # 停止相关服务（保留 Docker）
     echo "停止相关服务..."
     systemctl stop kubelet 2>/dev/null || true
     systemctl stop containerd 2>/dev/null || true
-    systemctl stop docker 2>/dev/null || true
     systemctl stop cri-docker 2>/dev/null || true
     
-    # 强制杀死相关进程
+    # 强制杀死相关进程（保留 Docker）
     echo "杀死相关进程..."
     pkill -9 -f kubelet 2>/dev/null || true
     pkill -9 -f kube-proxy 2>/dev/null || true
@@ -106,7 +105,7 @@ force_cleanup() {
     pkill -9 -f kube-scheduler 2>/dev/null || true
     pkill -9 -f etcd 2>/dev/null || true
     pkill -9 -f containerd 2>/dev/null || true
-    pkill -9 -f dockerd 2>/dev/null || true
+    # 注意：不杀死 dockerd 进程，保留 Docker
     
     # 等待进程完全停止
     sleep 5
@@ -115,72 +114,82 @@ force_cleanup() {
     echo "重置 kubeadm..."
     kubeadm reset -f 2>/dev/null || true
     
-    # 卸载软件包
-    echo "卸载软件包..."
+    # 卸载软件包（保留 Docker）
+    echo "卸载 Kubernetes 相关软件包..."
     case $PKG_MANAGER in
         apt)
             apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
             apt remove --purge -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
-            apt remove --purge -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
-            apt remove --purge -y docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+            apt remove --purge -y containerd.io containerd 2>/dev/null || true
             apt remove --purge -y cri-tools 2>/dev/null || true
+            # 注意：不卸载 Docker 相关包
+            # apt remove --purge -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin
             apt autoremove -y 2>/dev/null || true
             apt autoclean 2>/dev/null || true
             ;;
         yum|dnf)
             $PKG_MANAGER remove -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
-            $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
+            $PKG_MANAGER remove -y containerd.io containerd 2>/dev/null || true
             $PKG_MANAGER remove -y cri-tools 2>/dev/null || true
+            # 注意：不卸载 Docker 相关包
+            # $PKG_MANAGER remove -y docker-ce docker-ce-cli
             $PKG_MANAGER autoremove -y 2>/dev/null || true
             ;;
     esac
     
-    # 清理文件和目录
+    # 清理文件和目录（保留 Docker 数据）
     echo "清理文件和目录..."
     rm -rf ~/.kube
     rm -rf /etc/kubernetes
     rm -rf /var/lib/kubelet
     rm -rf /var/lib/etcd
-    rm -rf /etc/docker
     rm -rf /etc/containerd
     rm -rf /var/lib/containerd
     rm -rf /opt/containerd
-    rm -rf /var/lib/docker
+    # 注意：保留 Docker 目录
+    # rm -rf /etc/docker
+    # rm -rf /var/lib/docker
     rm -rf /opt/cni
     rm -rf /etc/cni
     rm -rf /var/lib/cni
     rm -rf /run/flannel
     rm -rf /etc/systemd/system/kubelet.service.d
-    rm -rf /etc/systemd/system/docker.service.d
+    # 注意：保留 Docker systemd 配置
+    # rm -rf /etc/systemd/system/docker.service.d
     rm -rf /lib/systemd/system/kubelet.service
     rm -rf /etc/crictl.yaml
     
-    # 清理仓库配置
+    # 清理仓库配置（保留 Docker 仓库）
     echo "清理仓库配置..."
     rm -rf /etc/apt/sources.list.d/kubernetes*.list
-    rm -rf /etc/apt/sources.list.d/docker*.list
     rm -rf /etc/yum.repos.d/kubernetes.repo
-    rm -rf /etc/yum.repos.d/docker*.repo
     rm -rf /etc/apt/keyrings/kubernetes*.gpg
-    rm -rf /etc/apt/keyrings/docker*.gpg
+    # 注意：保留 Docker 仓库配置
+    # rm -rf /etc/apt/sources.list.d/docker*.list
+    # rm -rf /etc/yum.repos.d/docker*.repo
+    # rm -rf /etc/apt/keyrings/docker*.gpg
     
     # 清理网络接口
     echo "清理网络接口..."
     ip link delete cni0 2>/dev/null || true
     ip link delete flannel.1 2>/dev/null || true
-    ip link delete docker0 2>/dev/null || true
     ip link delete kube-bridge 2>/dev/null || true
+    # 注意：保留 docker0 网桥
+    # ip link delete docker0 2>/dev/null || true
     
-    # 清理 iptables 规则
-    echo "清理 iptables 规则..."
-    iptables -F 2>/dev/null || true
-    iptables -X 2>/dev/null || true
-    iptables -t nat -F 2>/dev/null || true
-    iptables -t nat -X 2>/dev/null || true
-    iptables -t mangle -F 2>/dev/null || true
-    iptables -t mangle -X 2>/dev/null || true
-    iptables -t filter -F 2>/dev/null || true
-    iptables -t filter -X 2>/dev/null || true
+    # 清理 iptables 规则（只清理 Kubernetes 相关）
+    echo "清理 Kubernetes iptables 规则..."
+    # 清理 Kubernetes 相关的 iptables 规则，但保留 Docker 规则
+    iptables-save | grep -v KUBE | iptables-restore 2>/dev/null || {
+        # 如果上面的方法失败，使用传统方法但更小心
+        iptables -t filter -D FORWARD -j DOCKER-USER 2>/dev/null || true
+        iptables -t filter -D FORWARD -j DOCKER-ISOLATION-STAGE-1 2>/dev/null || true
+        # 清理其他非 Docker 规则
+        iptables -F INPUT 2>/dev/null || true
+        iptables -F OUTPUT 2>/dev/null || true
+        iptables -t nat -F OUTPUT 2>/dev/null || true
+        iptables -t nat -F PREROUTING 2>/dev/null || true
+    }
     
     # 清理 systemd 服务
     echo "清理 systemd 服务..."
@@ -193,8 +202,8 @@ force_cleanup() {
     umount /var/lib/kubelet/pods/*/volumes/kubernetes.io~configmap/* 2>/dev/null || true
     umount /var/lib/kubelet/* 2>/dev/null || true
     
-    # 检查并杀死占用关键端口的进程
-    echo "检查关键端口..."
+    # 检查并杀死占用 Kubernetes 关键端口的进程（不影响 Docker）
+    echo "检查 Kubernetes 关键端口..."
     for port in 6443 10250 10251 10252 2379 2380; do
         PID=$(lsof -ti :$port 2>/dev/null || true)
         if [ -n "$PID" ]; then
@@ -203,7 +212,7 @@ force_cleanup() {
         fi
     done
     
-    echo "✅ 强制清理完成"
+    echo "✅ Kubernetes 组件清理完成（Docker 已保留）"
 }
 
 # 更新系统函数
@@ -846,10 +855,33 @@ if [ "$INSTALL_RANCHER" = true ]; then
     # 创建 cattle-system 命名空间
     kubectl create namespace cattle-system 2>/dev/null || true
     
+    # 创建 Rancher ServiceAccount 和必要权限
+    echo "配置 Rancher 权限..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rancher
+  namespace: cattle-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rancher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: rancher
+  namespace: cattle-system
+EOF
+    
     # 检查网络是否就绪
     echo "检查网络连接..."
     NETWORK_READY=false
-    for i in {1..5}; do
+    for i in {1..3}; do
         if kubectl run network-test --image=busybox --rm -i --restart=Never -- nslookup kubernetes.default > /dev/null 2>&1; then
             NETWORK_READY=true
             break
@@ -861,11 +893,10 @@ if [ "$INSTALL_RANCHER" = true ]; then
     if [ "$NETWORK_READY" = false ]; then
         echo "⚠️  网络连接异常，重启网络组件..."
         kubectl delete pods -n kube-flannel --all 2>/dev/null || true
-        kubectl delete pods -n kube-system -l k8s-app=kube-dns 2>/dev/null || true
-        sleep 30
+        sleep 15
     fi
     
-    # 使用简化版 Rancher 部署
+    # 部署 Rancher（使用简化的有效配置）
     echo "部署 Rancher..."
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -885,6 +916,8 @@ spec:
       labels:
         app: rancher
     spec:
+      serviceAccountName: rancher
+      hostNetwork: true
       containers:
       - name: rancher
         image: rancher/rancher:v2.7.9
@@ -894,40 +927,16 @@ spec:
         env:
         - name: CATTLE_BOOTSTRAP_PASSWORD
           value: "admin123456"
-        - name: CATTLE_PASSWORD_MIN_LENGTH
-          value: "8"
-        - name: CATTLE_SERVER_URL
-          value: "https://rancher.local"
         args:
-        - "--http-listen-port=80"
-        - "--https-listen-port=443"
         - "--add-local=true"
+        - "--no-cacerts=true"
         resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
           limits:
             cpu: "1"
             memory: "2Gi"
-          requests:
-            cpu: "500m"
-            memory: "1Gi"
-        volumeMounts:
-        - name: rancher-data
-          mountPath: /var/lib/rancher
-        livenessProbe:
-          httpGet:
-            path: /ping
-            port: 80
-          initialDelaySeconds: 60
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            path: /ping
-            port: 80
-          initialDelaySeconds: 30
-          periodSeconds: 10
-      volumes:
-      - name: rancher-data
-        emptyDir: {}
-      restartPolicy: Always
 ---
 apiVersion: v1
 kind: Service
@@ -951,31 +960,34 @@ spec:
     app: rancher
 EOF
     
-    # 等待 Rancher 启动（更智能的等待）
+    # 等待 Rancher 启动（智能等待）
     echo "等待 Rancher 启动..."
-    echo "这可能需要 3-5 分钟，请耐心等待..."
+    echo "这可能需要 2-3 分钟，请耐心等待..."
     
-    # 等待 Pod 创建
-    kubectl wait --for=condition=PodReadyToStartContainers --timeout=300s pod -l app=rancher -n cattle-system 2>/dev/null || {
-        echo "Pod 创建超时，检查状态..."
-        kubectl get pods -n cattle-system
-        kubectl describe pod -l app=rancher -n cattle-system | tail -20
-    }
+    # 等待 Pod 就绪
+    for i in {1..12}; do
+        RANCHER_STATUS=$(kubectl get pods -n cattle-system -l app=rancher --no-headers 2>/dev/null | awk '{print $3}' | head -1)
+        if [ "$RANCHER_STATUS" = "Running" ]; then
+            echo "✅ Rancher 启动成功！"
+            break
+        elif [ "$RANCHER_STATUS" = "CrashLoopBackOff" ] || [ "$RANCHER_STATUS" = "Error" ]; then
+            echo "⚠️  Rancher 启动失败，状态: $RANCHER_STATUS"
+            echo "检查日志："
+            kubectl logs -n cattle-system -l app=rancher --tail=10 2>/dev/null || echo "日志暂不可用"
+            break
+        else
+            echo "等待中... (${i}/12) 当前状态: ${RANCHER_STATUS:-"创建中"}"
+            sleep 15
+        fi
+    done
     
-    # 等待容器就绪
-    kubectl wait --for=condition=Ready --timeout=600s pod -l app=rancher -n cattle-system 2>/dev/null || {
-        echo "容器启动超时，检查日志..."
-        kubectl get pods -n cattle-system
-        kubectl logs -n cattle-system -l app=rancher --tail=50 2>/dev/null || echo "日志暂不可用"
-    }
-    
-    # 检查最终状态
-    RANCHER_STATUS=$(kubectl get pods -n cattle-system -l app=rancher --no-headers 2>/dev/null | awk '{print $3}' | head -1)
-    if [ "$RANCHER_STATUS" = "Running" ]; then
-        echo "✅ Rancher 启动成功！"
+    # 最终状态检查
+    FINAL_STATUS=$(kubectl get pods -n cattle-system -l app=rancher --no-headers 2>/dev/null | awk '{print $3}' | head -1)
+    if [ "$FINAL_STATUS" = "Running" ]; then
+        echo "🎉 Rancher 部署成功！"
     else
-        echo "⚠️  Rancher 启动可能需要更多时间，当前状态: $RANCHER_STATUS"
-        echo "可以运行以下命令检查进度："
+        echo "⚠️  Rancher 当前状态: $FINAL_STATUS"
+        echo "可以运行以下命令检查："
         echo "kubectl get pods -n cattle-system"
         echo "kubectl logs -n cattle-system deployment/rancher -f"
     fi
