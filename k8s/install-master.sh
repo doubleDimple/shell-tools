@@ -1,9 +1,9 @@
 #!/bin/bash
-# Kubernetes 完整安装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
+# Kubernetes 完全重装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
 set -e
 
-echo "🚀 Kubernetes 多系统兼容安装脚本 v3.0"
-echo "支持 Ubuntu/Debian/CentOS/RHEL 系统"
+echo "🚀 Kubernetes 完全重装脚本 v4.0"
+echo "支持 Ubuntu/Debian/CentOS/RHEL 系统 - 强制清理重装"
 
 # 检查是否为 root 用户
 if [[ $EUID -ne 0 ]]; then
@@ -85,6 +85,127 @@ detect_os() {
     echo "使用包管理器: $PKG_MANAGER"
 }
 
+# 强制清理所有 Kubernetes 相关组件
+force_cleanup() {
+    echo ""
+    echo "🧹 [1/12] 强制清理所有 Kubernetes 组件..."
+    
+    # 停止所有相关服务
+    echo "停止相关服务..."
+    systemctl stop kubelet 2>/dev/null || true
+    systemctl stop containerd 2>/dev/null || true
+    systemctl stop docker 2>/dev/null || true
+    systemctl stop cri-docker 2>/dev/null || true
+    
+    # 强制杀死相关进程
+    echo "杀死相关进程..."
+    pkill -9 -f kubelet 2>/dev/null || true
+    pkill -9 -f kube-proxy 2>/dev/null || true
+    pkill -9 -f kube-apiserver 2>/dev/null || true
+    pkill -9 -f kube-controller 2>/dev/null || true
+    pkill -9 -f kube-scheduler 2>/dev/null || true
+    pkill -9 -f etcd 2>/dev/null || true
+    pkill -9 -f containerd 2>/dev/null || true
+    pkill -9 -f dockerd 2>/dev/null || true
+    
+    # 等待进程完全停止
+    sleep 5
+    
+    # 重置 kubeadm（如果存在）
+    echo "重置 kubeadm..."
+    kubeadm reset -f 2>/dev/null || true
+    
+    # 卸载软件包
+    echo "卸载软件包..."
+    case $PKG_MANAGER in
+        apt)
+            apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
+            apt remove --purge -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
+            apt remove --purge -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
+            apt remove --purge -y docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+            apt remove --purge -y cri-tools 2>/dev/null || true
+            apt autoremove -y 2>/dev/null || true
+            apt autoclean 2>/dev/null || true
+            ;;
+        yum|dnf)
+            $PKG_MANAGER remove -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
+            $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
+            $PKG_MANAGER remove -y cri-tools 2>/dev/null || true
+            $PKG_MANAGER autoremove -y 2>/dev/null || true
+            ;;
+    esac
+    
+    # 清理文件和目录
+    echo "清理文件和目录..."
+    rm -rf ~/.kube
+    rm -rf /etc/kubernetes
+    rm -rf /var/lib/kubelet
+    rm -rf /var/lib/etcd
+    rm -rf /etc/docker
+    rm -rf /etc/containerd
+    rm -rf /var/lib/containerd
+    rm -rf /opt/containerd
+    rm -rf /var/lib/docker
+    rm -rf /opt/cni
+    rm -rf /etc/cni
+    rm -rf /var/lib/cni
+    rm -rf /run/flannel
+    rm -rf /etc/systemd/system/kubelet.service.d
+    rm -rf /etc/systemd/system/docker.service.d
+    rm -rf /lib/systemd/system/kubelet.service
+    rm -rf /etc/crictl.yaml
+    
+    # 清理仓库配置
+    echo "清理仓库配置..."
+    rm -rf /etc/apt/sources.list.d/kubernetes*.list
+    rm -rf /etc/apt/sources.list.d/docker*.list
+    rm -rf /etc/yum.repos.d/kubernetes.repo
+    rm -rf /etc/yum.repos.d/docker*.repo
+    rm -rf /etc/apt/keyrings/kubernetes*.gpg
+    rm -rf /etc/apt/keyrings/docker*.gpg
+    
+    # 清理网络接口
+    echo "清理网络接口..."
+    ip link delete cni0 2>/dev/null || true
+    ip link delete flannel.1 2>/dev/null || true
+    ip link delete docker0 2>/dev/null || true
+    ip link delete kube-bridge 2>/dev/null || true
+    
+    # 清理 iptables 规则
+    echo "清理 iptables 规则..."
+    iptables -F 2>/dev/null || true
+    iptables -X 2>/dev/null || true
+    iptables -t nat -F 2>/dev/null || true
+    iptables -t nat -X 2>/dev/null || true
+    iptables -t mangle -F 2>/dev/null || true
+    iptables -t mangle -X 2>/dev/null || true
+    iptables -t filter -F 2>/dev/null || true
+    iptables -t filter -X 2>/dev/null || true
+    
+    # 清理 systemd 服务
+    echo "清理 systemd 服务..."
+    systemctl daemon-reload
+    systemctl reset-failed
+    
+    # 强制卸载残留的挂载点
+    echo "清理挂载点..."
+    umount /var/lib/kubelet/pods/*/volumes/kubernetes.io~secret/* 2>/dev/null || true
+    umount /var/lib/kubelet/pods/*/volumes/kubernetes.io~configmap/* 2>/dev/null || true
+    umount /var/lib/kubelet/* 2>/dev/null || true
+    
+    # 检查并杀死占用关键端口的进程
+    echo "检查关键端口..."
+    for port in 6443 10250 10251 10252 2379 2380; do
+        PID=$(lsof -ti :$port 2>/dev/null || true)
+        if [ -n "$PID" ]; then
+            echo "杀死占用端口 $port 的进程 $PID"
+            kill -9 $PID 2>/dev/null || true
+        fi
+    done
+    
+    echo "✅ 强制清理完成"
+}
+
 # 更新系统函数
 update_system() {
     case $PKG_MANAGER in
@@ -101,10 +222,10 @@ update_system() {
 install_basic_packages() {
     case $PKG_MANAGER in
         apt)
-            apt install -y apt-transport-https ca-certificates curl gnupg lsb-release software-properties-common
+            apt install -y apt-transport-https ca-certificates curl gnupg lsb-release software-properties-common wget
             ;;
         yum|dnf)
-            $PKG_MANAGER install -y curl gnupg2 software-properties-common yum-utils device-mapper-persistent-data lvm2
+            $PKG_MANAGER install -y curl gnupg2 software-properties-common yum-utils device-mapper-persistent-data lvm2 wget
             ;;
     esac
 }
@@ -162,6 +283,19 @@ EOF
     esac
 }
 
+# 安装 Helm
+install_helm() {
+    echo "安装 Helm..."
+    if ! command -v helm &> /dev/null; then
+        curl https://get.helm.sh/helm-v3.12.1-linux-amd64.tar.gz -o helm.tar.gz
+        tar -zxvf helm.tar.gz
+        mv linux-amd64/helm /usr/local/bin/helm
+        rm -rf helm.tar.gz linux-amd64
+        chmod +x /usr/local/bin/helm
+    fi
+    helm version
+}
+
 # 开始安装
 detect_os
 
@@ -173,65 +307,16 @@ if [ -n "$CODENAME" ]; then
     echo "代码名: $CODENAME"
 fi
 
-echo ""
-echo "🧹 [1/10] 彻底清理系统..."
-
-# 停止所有服务
-systemctl stop kubelet 2>/dev/null || true
-systemctl stop containerd 2>/dev/null || true
-systemctl stop docker 2>/dev/null || true
-
-# 重置 kubeadm
-kubeadm reset -f 2>/dev/null || true
-
-# 彻底卸载所有相关软件包
-case $PKG_MANAGER in
-    apt)
-        apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
-        apt remove --purge -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
-        apt remove --purge -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
-        apt remove --purge -y docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
-        apt autoremove -y
-        apt autoclean
-        ;;
-    yum|dnf)
-        $PKG_MANAGER remove -y kubelet kubeadm kubectl kubernetes-cni 2>/dev/null || true
-        $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io containerd 2>/dev/null || true
-        $PKG_MANAGER autoremove -y 2>/dev/null || true
-        ;;
-esac
-
-# 清理残留文件
-rm -rf ~/.kube /etc/kubernetes /var/lib/kubelet /var/lib/etcd
-rm -rf /etc/docker /etc/containerd /var/lib/containerd /opt/containerd
-rm -rf /etc/systemd/system/kubelet.service.d
-rm -rf /etc/apt/sources.list.d/kubernetes*.list
-rm -rf /etc/apt/sources.list.d/docker.list
-rm -rf /etc/yum.repos.d/kubernetes.repo
-rm -rf /etc/yum.repos.d/docker*.repo
-rm -rf /etc/apt/keyrings/kubernetes*.gpg
-rm -rf /etc/apt/keyrings/docker.gpg
-rm -rf /etc/crictl.yaml
-
-# 清理网络
-ip link delete cni0 2>/dev/null || true
-ip link delete flannel.1 2>/dev/null || true
-
-# 清理 iptables 规则
-iptables -F 2>/dev/null || true
-iptables -X 2>/dev/null || true
-iptables -t nat -F 2>/dev/null || true
-iptables -t nat -X 2>/dev/null || true
-
-echo "✅ 清理完成"
+# 强制清理
+force_cleanup
 
 echo ""
-echo "📦 [2/10] 安装系统依赖..."
+echo "📦 [2/12] 更新系统并安装依赖..."
 update_system
 install_basic_packages
 
 echo ""
-echo "🔧 [3/10] 配置内核参数..."
+echo "🔧 [3/12] 配置内核参数..."
 # 配置内核模块
 cat <<EOF | tee /etc/modules-load.d/k8s.conf
 overlay
@@ -261,14 +346,14 @@ swapoff -a
 sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
 echo ""
-echo "🐳 [4/10] 安装 containerd..."
+echo "🐳 [4/12] 安装 containerd..."
 install_containerd
 
 echo ""
-echo "🔧 [5/10] 配置 containerd..."
+echo "🔧 [5/12] 配置 containerd..."
 
 # 停止 containerd 服务
-systemctl stop containerd
+systemctl stop containerd 2>/dev/null || true
 
 # 创建配置目录
 mkdir -p /etc/containerd
@@ -294,14 +379,14 @@ echo "验证 containerd 状态:"
 systemctl status containerd --no-pager
 
 echo ""
-echo "☸️  [6/10] 安装 Kubernetes 1.29..."
+echo "☸️  [6/12] 安装 Kubernetes 1.29..."
 install_kubernetes
 
 # 启动 kubelet
 systemctl enable kubelet
 
 echo ""
-echo "🔧 [7/10] 配置 CRI 接口..."
+echo "🔧 [7/12] 配置 CRI 接口..."
 
 # 安装 cri-tools
 case $PKG_MANAGER in
@@ -323,7 +408,11 @@ pull-image-on-create: false
 EOF
 
 echo ""
-echo "🔍 [8/10] 验证安装..."
+echo "🛠️ [8/12] 安装 Helm..."
+install_helm
+
+echo ""
+echo "🔍 [9/12] 验证安装..."
 
 echo "containerd 版本:"
 containerd --version
@@ -340,12 +429,15 @@ kubelet --version
 echo "kubectl 版本:"
 kubectl version --client
 
+echo "helm 版本:"
+helm version
+
 # 测试 CRI 连接
 echo "测试 CRI 连接:"
 crictl info | head -20
 
 echo ""
-echo "🎯 [9/10] 初始化 Kubernetes 集群..."
+echo "🎯 [10/12] 初始化 Kubernetes 集群..."
 
 # 获取本机 IP
 LOCAL_IP=$(hostname -I | awk '{print $1}')
@@ -362,7 +454,8 @@ kubeadm init \
     --pod-network-cidr=10.244.0.0/16 \
     --service-cidr=10.96.0.0/12 \
     --cri-socket=unix:///var/run/containerd/containerd.sock \
-    --kubernetes-version=v1.29.0
+    --kubernetes-version=v1.29.0 \
+    --ignore-preflight-errors=Port-6443,Port-10250,Port-10251,Port-10252,Port-2379,Port-2380
 
 # 配置 kubectl
 mkdir -p $HOME/.kube
@@ -373,7 +466,7 @@ chown $(id -u):$(id -g) $HOME/.kube/config
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
 
 echo ""
-echo "🌐 [10/10] 安装网络插件..."
+echo "🌐 [11/12] 安装网络插件..."
 
 # 安装 Flannel
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
@@ -382,13 +475,21 @@ kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/
 echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s || true
 
-# 安装 KubeSphere
-echo "安装 KubeSphere..."
-kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/kubesphere-installer.yaml
-kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.4.1/cluster-configuration.yaml
+echo ""
+echo "📊 [12/12] 安装 KubeSphere..."
+
+# 使用 Helm 安装 KubeSphere（官方推荐方式）
+echo "使用 Helm 安装 KubeSphere Core..."
+helm upgrade --install -n kubesphere-system --create-namespace ks-core \
+    https://charts.kubesphere.io/main/ks-core-1.1.3.tgz --debug --wait --timeout=20m || {
+    echo "Helm 安装失败，尝试传统方式..."
+    # 如果 Helm 安装失败，使用传统方式
+    kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.3.1/kubesphere-installer.yaml || true
+    kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.3.1/cluster-configuration.yaml || true
+}
 
 echo ""
-echo "🎉 安装完成！"
+echo "🎉 Kubernetes + KubeSphere 安装完成！"
 echo "================================================================"
 
 # 显示集群状态
@@ -398,6 +499,10 @@ kubectl get nodes -o wide
 echo ""
 echo "系统 Pods 状态:"
 kubectl get pods -n kube-system
+
+echo ""
+echo "KubeSphere 相关 Pods:"
+kubectl get pods -n kubesphere-system 2>/dev/null || echo "KubeSphere 系统还在启动中..."
 
 echo ""
 echo "================================================================"
@@ -413,17 +518,23 @@ echo "密码: P@88w0rd"
 
 echo ""
 echo "🔍 监控命令："
-echo "kubectl get pods --all-namespaces               # 查看所有 Pod"
-echo "kubectl logs -n kubesphere-system deployment/ks-installer -f  # KubeSphere 安装日志"
-echo "systemctl status kubelet                        # kubelet 状态"
-echo "systemctl status containerd                     # containerd 状态"
-echo "crictl ps                                       # 容器列表"
+echo "kubectl get pods --all-namespaces                              # 查看所有 Pod"
+echo "kubectl get svc -n kubesphere-system                           # 查看 KubeSphere 服务"
+echo "kubectl logs -n kubesphere-system deployment/ks-installer -f   # KubeSphere 安装日志"
+echo "systemctl status kubelet                                       # kubelet 状态"
+echo "systemctl status containerd                                    # containerd 状态"
+echo "crictl ps                                                      # 容器列表"
 
 echo ""
-echo "⚠️  注意："
-echo "1. KubeSphere 完全启动需要 5-10 分钟"
-echo "2. 如果是云服务器，请开放 6443 和 30880 端口"
-echo "3. 建议首次登录后修改默认密码"
+echo "⚠️  重要提醒："
+echo "1. KubeSphere 完全启动需要 10-15 分钟，请耐心等待"
+echo "2. 如果是云服务器，请确保防火墙开放以下端口："
+echo "   - 6443 (Kubernetes API)"
+echo "   - 30000-32767 (NodePort 服务)"
+echo "   - 30880 (KubeSphere 控制台)"
+echo "3. 首次登录 KubeSphere 后请及时修改默认密码"
+echo "4. 可以通过以下命令检查 KubeSphere 安装状态："
+echo "   kubectl get pods -n kubesphere-system"
 
 echo ""
-echo "✅ 脚本执行完毕！请等待所有 Pod 启动完成。"
+echo "✅ 脚本执行完毕！请等待所有组件完全启动。"
