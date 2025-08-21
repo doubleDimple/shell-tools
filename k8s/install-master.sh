@@ -311,24 +311,34 @@ choose_dashboard() {
     echo "🎯 选择要安装的控制台："
     echo "1) Kubernetes Dashboard (官方，轻量级，Token 登录)"
     echo "2) Rancher (开源版，功能完整，图形化用户管理)"
+    echo "3) KubeSphere (现代化界面，功能丰富，中文支持)"
     echo ""
     while true; do
-        read -p "请选择 [1-2]: " DASHBOARD_CHOICE
+        read -p "请选择 [1-3]: " DASHBOARD_CHOICE
         case $DASHBOARD_CHOICE in
             1)
                 INSTALL_K8S_DASHBOARD=true
                 INSTALL_RANCHER=false
+                INSTALL_KUBESPHERE=false
                 echo "✅ 已选择：Kubernetes Dashboard"
                 break
                 ;;
             2)
                 INSTALL_K8S_DASHBOARD=false
                 INSTALL_RANCHER=true
+                INSTALL_KUBESPHERE=false
                 echo "✅ 已选择：Rancher"
                 break
                 ;;
+            3)
+                INSTALL_K8S_DASHBOARD=false
+                INSTALL_RANCHER=false
+                INSTALL_KUBESPHERE=true
+                echo "✅ 已选择：KubeSphere"
+                break
+                ;;
             *)
-                echo "❌ 无效选择，请输入 1 或 2"
+                echo "❌ 无效选择，请输入 1、2 或 3"
                 ;;
         esac
     done
@@ -1020,6 +1030,12 @@ if [ "$INSTALL_RANCHER" = true ]; then
     kubectl get pods -n cattle-system
 fi
 
+if [ "$INSTALL_KUBESPHERE" = true ]; then
+    echo ""
+    echo "KubeSphere Pods:"
+    kubectl get pods -n kubesphere-system
+fi
+
 echo ""
 echo "================================================================"
 echo "🔑 Worker 节点加入命令："
@@ -1046,6 +1062,16 @@ if [ "$INSTALL_RANCHER" = true ]; then
     echo "初始用户名: admin"
     echo "初始密码: admin123456"
     echo "⚠️  首次登录后请设置新密码"
+fi
+
+if [ "$INSTALL_KUBESPHERE" = true ]; then
+    echo ""
+    echo "🎯 KubeSphere 控制台:"
+    echo "地址: http://$LOCAL_IP:30880"
+    echo "默认用户名: admin"
+    echo "默认密码: P@88w0rd"
+    echo "⚠️  首次登录后请及时修改默认密码"
+    echo "💡 KubeSphere 支持完整的用户管理和中文界面"
 fi
 
 echo ""
