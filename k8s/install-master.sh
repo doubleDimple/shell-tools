@@ -18,7 +18,37 @@ detect_os() {
         . /etc/os-release
         OS=$ID
         OS_VERSION=$VERSION_ID
-        CODENAME=$VERSION_CODENAME
+        
+        # 特别处理一些系统的识别
+        case $ID in
+            ubuntu)
+                OS="ubuntu"
+                CODENAME=$VERSION_CODENAME
+                ;;
+            debian)
+                OS="debian" 
+                CODENAME=$VERSION_CODENAME
+                ;;
+            centos|rhel|rocky|almalinux)
+                OS=$ID
+                ;;
+            *)
+                # 如果检测不到，通过文件判断
+                if [ -f /etc/debian_version ]; then
+                    if grep -q "ubuntu" /etc/os-release 2>/dev/null; then
+                        OS="ubuntu"
+                    else
+                        OS="debian"
+                    fi
+                    CODENAME=$(lsb_release -cs 2>/dev/null || echo "bullseye")
+                elif [ -f /etc/redhat-release ]; then
+                    OS="centos"
+                fi
+                ;;
+        esac
+    elif [ -f /etc/debian_version ]; then
+        OS="debian"
+        CODENAME=$(lsb_release -cs 2>/dev/null || echo "bullseye")
     elif [ -f /etc/redhat-release ]; then
         OS="centos"
         OS_VERSION=$(cat /etc/redhat-release | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -27,7 +57,13 @@ detect_os() {
         exit 1
     fi
     
-    echo "检测到系统: $OS $OS_VERSION"
+    echo "检测到系统: $OS"
+    if [ -n "$OS_VERSION" ]; then
+        echo "系统版本: $OS_VERSION"
+    fi
+    if [ -n "$CODENAME" ]; then
+        echo "代码名: $CODENAME"
+    fi
     
     # 设置包管理器
     case $OS in
