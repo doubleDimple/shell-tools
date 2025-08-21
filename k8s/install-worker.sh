@@ -130,12 +130,29 @@ sleep 5
 
 echo ""
 echo "[6/7] 配置 CRI 工具..."
-# 安装 cri-tools
-if [ "$PKG_MANAGER" = "apt" ]; then
-    apt install -y cri-tools
-elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-    $PKG_MANAGER install -y cri-tools
+# 下载并安装 crictl（cri-tools）
+CRICTL_VERSION="v1.29.0"
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+elif [ "$ARCH" = "aarch64" ]; then
+    ARCH="arm64"
 fi
+
+echo "下载 crictl ${CRICTL_VERSION}..."
+wget -q "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" || {
+    echo "下载失败，尝试备用地址..."
+    curl -L -o "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" \
+        "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+}
+
+# 解压并安装
+tar -C /usr/local/bin -xzf "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+chmod +x /usr/local/bin/crictl
+rm -f "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+
+# 创建软链接
+ln -sf /usr/local/bin/crictl /usr/bin/crictl 2>/dev/null || true
 
 # 配置 crictl
 cat > /etc/crictl.yaml << EOF
@@ -145,6 +162,8 @@ timeout: 10
 debug: false
 pull-image-on-create: false
 EOF
+
+echo "crictl 安装完成: $(crictl --version)"
 
 echo ""
 echo "[7/7] 安装 Kubernetes 组件 (v1.29.0，与 Master 一致)..."
