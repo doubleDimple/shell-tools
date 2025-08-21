@@ -1,0 +1,16 @@
+version: "3"
+
+services:
+  hbbs:
+    image: rustdesk/rustdesk-server:latest
+    container_name: hbbs
+    restart: always
+    network_mode: host
+    command: hbbs
+
+  hbbr:
+    image: rustdesk/rustdesk-server:latest
+    container_name: hbbr
+    restart: always
+    network_mode: host
+    command: hbbr
