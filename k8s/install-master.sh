@@ -2,7 +2,7 @@
 # Kubernetes + 多控制台选择安装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
 set -e
 
-echo "🚀 Kubernetes + 多控制台选择安装脚本 v6.0"
+echo "🚀 Kubernetes + 多控制台选择安装脚本 v6.1 (网络修复版)"
 echo "支持 Ubuntu/Debian/CentOS/RHEL 系统 - 强制清理重装"
 
 # 检查是否为 root 用户
@@ -519,26 +519,316 @@ kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || 
 echo ""
 echo "🌐 [11/13] 安装网络插件..."
 
-# 安装 Flannel
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+# 停止 kubelet 以确保干净的网络设置
+systemctl stop kubelet
+
+# 清理可能存在的网络配置
+echo "清理现有网络配置..."
+rm -rf /etc/cni/net.d/*
+rm -rf /var/lib/cni/*
+rm -rf /run/flannel/*
+ip link delete cni0 2>/dev/null || true
+ip link delete flannel.1 2>/dev/null || true
+
+# 创建必要的目录
+mkdir -p /run/flannel
+mkdir -p /etc/cni/net.d
+mkdir -p /opt/cni/bin
+
+# 重启 kubelet
+systemctl start kubelet
+sleep 10
+
+# 使用稳定的 Flannel 配置
+echo "安装优化的 Flannel 网络插件..."
+cat <<EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    k8s-app: flannel
+    pod-security.kubernetes.io/enforce: privileged
+  name: kube-flannel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+  namespace: kube-flannel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - clustercidrs
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flannel
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: kube-flannel
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: flannel
+    k8s-app: flannel
+    tier: node
+  name: kube-flannel-cfg
+  namespace: kube-flannel
+data:
+  cni-conf.json: |
+    {
+      "name": "cbr0",
+      "cniVersion": "1.0.0",
+      "plugins": [
+        {
+          "type": "flannel",
+          "delegate": {
+            "hairpinMode": true,
+            "isDefaultGateway": true
+          }
+        },
+        {
+          "type": "portmap",
+          "capabilities": {
+            "portMappings": true
+          }
+        }
+      ]
+    }
+  net-conf.json: |
+    {
+      "Network": "10.244.0.0/16",
+      "Backend": {
+        "Type": "vxlan"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: flannel
+    k8s-app: flannel
+    tier: node
+  name: kube-flannel-ds
+  namespace: kube-flannel
+spec:
+  selector:
+    matchLabels:
+      app: flannel
+      k8s-app: flannel
+  template:
+    metadata:
+      labels:
+        app: flannel
+        k8s-app: flannel
+        tier: node
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      containers:
+      - args:
+        - --ip-masq
+        - --kube-subnet-mgr
+        command:
+        - /opt/bin/flanneld
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: EVENT_QUEUE_DEPTH
+          value: "5000"
+        image: docker.io/flannel/flannel:v0.24.2
+        name: kube-flannel
+        resources:
+          requests:
+            cpu: 100m
+            memory: 50Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          privileged: false
+        volumeMounts:
+        - mountPath: /run/flannel
+          name: run
+        - mountPath: /etc/kube-flannel/
+          name: flannel-cfg
+        - mountPath: /run/xtables.lock
+          name: xtables-lock
+      hostNetwork: true
+      initContainers:
+      - args:
+        - -f
+        - /flannel
+        - /opt/cni/bin/flannel
+        command:
+        - cp
+        image: docker.io/flannel/flannel-cni-plugin:v1.4.0-flannel1
+        name: install-cni-plugin
+        volumeMounts:
+        - mountPath: /opt/cni/bin
+          name: cni-plugin
+      - args:
+        - -f
+        - /etc/kube-flannel/cni-conf.json
+        - /etc/cni/net.d/10-flannel.conflist
+        command:
+        - cp
+        image: docker.io/flannel/flannel:v0.24.2
+        name: install-cni
+        volumeMounts:
+        - mountPath: /etc/cni/net.d
+          name: cni
+        - mountPath: /etc/kube-flannel/
+          name: flannel-cfg
+      priorityClassName: system-node-critical
+      serviceAccountName: flannel
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - hostPath:
+          path: /run/flannel
+        name: run
+      - hostPath:
+          path: /opt/cni/bin
+        name: cni-plugin
+      - hostPath:
+          path: /etc/cni/net.d
+        name: cni
+      - configMap:
+          name: kube-flannel-cfg
+        name: flannel-cfg
+      - hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+        name: xtables-lock
+EOF
+
+# 等待 Flannel Pod 启动
+echo "等待 Flannel Pod 启动（最多 5 分钟）..."
+for i in {1..20}; do
+    FLANNEL_STATUS=$(kubectl get pods -n kube-flannel --no-headers 2>/dev/null | grep -v Terminating | awk '{print $3}' | head -1)
+    if [ "$FLANNEL_STATUS" = "Running" ]; then
+        echo "✅ Flannel 启动成功！"
+        break
+    elif [ "$FLANNEL_STATUS" = "CrashLoopBackOff" ] || [ "$FLANNEL_STATUS" = "Error" ]; then
+        echo "⚠️ Flannel 启动失败，状态: $FLANNEL_STATUS"
+        echo "查看详细日志:"
+        kubectl logs -n kube-flannel -l app=flannel --tail=20 2>/dev/null || echo "日志暂不可用"
+        
+        # 修复 Flannel 目录权限
+        echo "修复 Flannel 目录权限..."
+        mkdir -p /run/flannel
+        chmod 755 /run/flannel
+        
+        # 手动创建 subnet.env 文件
+        echo "创建 Flannel subnet.env 文件..."
+        cat > /run/flannel/subnet.env << SUBNETEOF
+FLANNEL_NETWORK=10.244.0.0/16
+FLANNEL_SUBNET=10.244.0.1/24
+FLANNEL_MTU=1450
+FLANNEL_IPMASQ=true
+SUBNETEOF
+        
+        # 重启 Flannel Pod
+        kubectl delete pods -n kube-flannel --all 2>/dev/null || true
+        sleep 30
+        break
+    else
+        echo "等待中... (${i}/20) 当前状态: ${FLANNEL_STATUS:-"创建中"}"
+        sleep 15
+    fi
+done
+
+# 确保 /run/flannel/subnet.env 文件存在
+if [ ! -f /run/flannel/subnet.env ]; then
+    echo "创建 Flannel subnet.env 文件..."
+    mkdir -p /run/flannel
+    cat > /run/flannel/subnet.env << EOF
+FLANNEL_NETWORK=10.244.0.0/16
+FLANNEL_SUBNET=10.244.0.1/24
+FLANNEL_MTU=1450
+FLANNEL_IPMASQ=true
+EOF
+    chmod 644 /run/flannel/subnet.env
+fi
 
 # 等待节点就绪
 echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s || true
 
-# 检查 Flannel 网络状态
-echo "检查网络插件状态..."
+# 检查 CoreDNS
+echo "检查 CoreDNS 状态..."
 kubectl wait --for=condition=available --timeout=180s deployment/coredns -n kube-system || true
 
-# 确保 Flannel 正常运行
-echo "验证 Flannel 网络..."
-sleep 30
-FLANNEL_READY=$(kubectl get pods -n kube-flannel --no-headers | grep Running | wc -l)
-if [ "$FLANNEL_READY" -eq 0 ]; then
-    echo "⚠️  Flannel 未正常启动，重新部署..."
-    kubectl delete pods -n kube-flannel --all 2>/dev/null || true
-    sleep 15
-    kubectl wait --for=condition=Ready --timeout=120s pod -l app=flannel -n kube-flannel || true
+# 最终验证
+echo "验证网络配置..."
+sleep 15
+FLANNEL_FINAL=$(kubectl get pods -n kube-flannel --no-headers | grep Running | wc -l)
+if [ "$FLANNEL_FINAL" -eq 0 ]; then
+    echo "⚠️  Flannel 仍未正常运行，但继续安装..."
+    echo "可以稍后手动修复网络问题"
+else
+    echo "✅ Flannel 网络配置完成"
 fi
 
 echo "✅ 网络插件配置完成"
@@ -1119,87 +1409,12 @@ if [ "$INSTALL_RANCHER" = true ]; then
 fi
 
 echo ""
-echo "✅ 脚本执行完毕！集群和控制台已准备就绪。"-dashboard
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: admin-user
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-- kind: ServiceAccount
-  name: admin-user
-  namespace: kubernetes-dashboard
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: admin-user-token
-  namespace: kubernetes-dashboard
-  annotations:
-    kubernetes.io/service-account.name: admin-user
-type: kubernetes.io/service-account-token
-EOF
-
-# 等待 Secret 创建完成
-sleep 5
-
-# 生成访问令牌
-echo "获取访问令牌..."
-TOKEN=$(kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d 2>/dev/null || kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || echo "Token生成失败，请手动运行：kubectl -n kubernetes-dashboard create token admin-user")
+echo "🌐 网络故障排除："
+echo "如果网络有问题，可以运行以下命令："
+echo "kubectl get pods -n kube-flannel                               # 检查 Flannel 状态"
+echo "ls -la /run/flannel/                                           # 检查 Flannel 配置文件"
+echo "kubectl logs -n kube-flannel -l app=flannel                    # 查看 Flannel 日志"
+echo "kubectl describe pod [dashboard-pod-name] -n kubernetes-dashboard  # 查看 Dashboard Pod 详情"
 
 echo ""
-echo "🎉 Kubernetes + Dashboard 安装完成！"
-echo "================================================================"
-
-# 显示集群状态
-echo "集群节点状态:"
-kubectl get nodes -o wide
-
-echo ""
-echo "系统 Pods 状态:"
-kubectl get pods -n kube-system
-
-echo ""
-echo "Dashboard 相关 Pods:"
-kubectl get pods -n kubernetes-dashboard
-
-echo ""
-echo "================================================================"
-echo "🔑 Worker 节点加入命令："
-kubeadm token create --print-join-command
-echo "================================================================"
-
-echo ""
-echo "📊 Kubernetes Dashboard 控制台："
-echo "地址: https://$LOCAL_IP:30443"
-echo "登录方式: Token"
-echo "访问令牌:"
-echo "$TOKEN"
-
-echo ""
-echo "🔍 监控命令："
-echo "kubectl get pods --all-namespaces                              # 查看所有 Pod"
-echo "kubectl get svc -n kubernetes-dashboard                        # 查看 Dashboard 服务"
-echo "kubectl -n kubernetes-dashboard create token admin-user        # 重新生成访问令牌"
-echo "kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d  # 获取永久令牌"
-echo "systemctl status kubelet                                       # kubelet 状态"
-echo "systemctl status containerd                                    # containerd 状态"
-echo "crictl ps                                                      # 容器列表"
-
-echo ""
-echo "⚠️  重要提醒："
-echo "1. Dashboard 使用 HTTPS，浏览器会提示证书警告，点击'高级'->'继续访问'即可"
-echo "2. 登录时选择 'Token' 方式，粘贴上面显示的访问令牌"
-echo "3. 如果是云服务器，请确保防火墙开放以下端口："
-echo "   - 6443 (Kubernetes API)"
-echo "   - 30000-32767 (NodePort 服务)"
-echo "   - 30443 (Kubernetes Dashboard)"
-echo "4. 如需重新生成令牌，运行："
-echo "   kubectl -n kubernetes-dashboard create token admin-user"
-
-echo ""
-echo "✅ 脚本执行完毕！Kubernetes 集群和 Dashboard 已准备就绪。"
+echo "✅ 脚本执行完毕！集群和控制台已准备就绪。"
