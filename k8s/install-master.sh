@@ -1,8 +1,8 @@
 #!/bin/bash
-# Kubernetes 完全重装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
+# Kubernetes + Dashboard 完全重装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
 set -e
 
-echo "🚀 Kubernetes 完全重装脚本 v4.0"
+echo "🚀 Kubernetes + Dashboard 完全重装脚本 v5.0"
 echo "支持 Ubuntu/Debian/CentOS/RHEL 系统 - 强制清理重装"
 
 # 检查是否为 root 用户
@@ -476,20 +476,320 @@ echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s || true
 
 echo ""
-echo "📊 [12/12] 安装 KubeSphere..."
+echo "📊 [12/12] 安装 Kubernetes Dashboard..."
 
-# 使用 Helm 安装 KubeSphere（官方推荐方式）
-echo "使用 Helm 安装 KubeSphere Core..."
-helm upgrade --install -n kubesphere-system --create-namespace ks-core \
-    https://charts.kubesphere.io/main/ks-core-1.1.3.tgz --debug --wait --timeout=20m || {
-    echo "Helm 安装失败，尝试传统方式..."
-    # 如果 Helm 安装失败，使用传统方式
-    kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.3.1/kubesphere-installer.yaml || true
-    kubectl apply -f https://github.com/kubesphere/ks-installer/releases/download/v3.3.1/cluster-configuration.yaml || true
+# 安装 Kubernetes Dashboard
+echo "安装 Kubernetes Dashboard..."
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml || {
+    echo "GitHub 下载失败，使用备用方式..."
+    # 备用方式：内联配置
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubernetes-dashboard
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  type: NodePort
+  ports:
+    - port: 443
+      targetPort: 8443
+      nodePort: 30443
+  selector:
+    k8s-app: kubernetes-dashboard
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-certs
+  namespace: kubernetes-dashboard
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-csrf
+  namespace: kubernetes-dashboard
+type: Opaque
+data:
+  csrf: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-key-holder
+  namespace: kubernetes-dashboard
+type: Opaque
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-settings
+  namespace: kubernetes-dashboard
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["kubernetes-dashboard-key-holder", "kubernetes-dashboard-certs", "kubernetes-dashboard-csrf"]
+    verbs: ["get", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kubernetes-dashboard-settings"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["heapster", "dashboard-metrics-scraper"]
+    verbs: ["proxy"]
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["heapster", "http:heapster:", "https:heapster:", "dashboard-metrics-scraper", "http:dashboard-metrics-scraper"]
+    verbs: ["get"]
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubernetes-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-dashboard
+    namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubernetes-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-dashboard
+    namespace: kubernetes-dashboard
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+    spec:
+      containers:
+        - name: kubernetes-dashboard
+          image: kubernetesui/dashboard:v2.7.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+          args:
+            - --auto-generate-certificates
+            - --namespace=kubernetes-dashboard
+          volumeMounts:
+            - name: kubernetes-dashboard-certs
+              mountPath: /certs
+            - mountPath: /tmp
+              name: tmp-volume
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /
+              port: 8443
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1001
+            runAsGroup: 2001
+      volumes:
+        - name: kubernetes-dashboard-certs
+          secret:
+            secretName: kubernetes-dashboard-certs
+        - name: tmp-volume
+          emptyDir: {}
+      serviceAccountName: kubernetes-dashboard
+      nodeSelector:
+        "kubernetes.io/os": linux
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: dashboard-metrics-scraper
+  name: dashboard-metrics-scraper
+  namespace: kubernetes-dashboard
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+  selector:
+    k8s-app: dashboard-metrics-scraper
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  labels:
+    k8s-app: dashboard-metrics-scraper
+  name: dashboard-metrics-scraper
+  namespace: kubernetes-dashboard
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: dashboard-metrics-scraper
+  template:
+    metadata:
+      labels:
+        k8s-app: dashboard-metrics-scraper
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dashboard-metrics-scraper
+          image: kubernetesui/metrics-scraper:v1.0.8
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              scheme: HTTP
+              path: /
+              port: 8000
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          volumeMounts:
+          - mountPath: /tmp
+            name: tmp-volume
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1001
+            runAsGroup: 2001
+      serviceAccountName: kubernetes-dashboard
+      nodeSelector:
+        "kubernetes.io/os": linux
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+EOF
 }
 
+# 等待 Dashboard 启动
+echo "等待 Dashboard 启动..."
+kubectl wait --for=condition=available --timeout=300s deployment/kubernetes-dashboard -n kubernetes-dashboard || true
+
+# 修改服务类型为 NodePort
+echo "配置 Dashboard 外部访问..."
+kubectl patch svc kubernetes-dashboard -n kubernetes-dashboard -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8443,"nodePort":30443}]}}' 2>/dev/null || true
+
+# 创建管理员用户
+echo "创建管理员用户..."
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: admin-user-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: admin-user
+type: kubernetes.io/service-account-token
+EOF
+
+# 等待 Secret 创建完成
+sleep 5
+
+# 生成访问令牌
+echo "获取访问令牌..."
+TOKEN=$(kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d 2>/dev/null || kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || echo "Token生成失败，请手动运行：kubectl -n kubernetes-dashboard create token admin-user")
+
 echo ""
-echo "🎉 Kubernetes + KubeSphere 安装完成！"
+echo "🎉 Kubernetes + Dashboard 安装完成！"
 echo "================================================================"
 
 # 显示集群状态
@@ -501,8 +801,8 @@ echo "系统 Pods 状态:"
 kubectl get pods -n kube-system
 
 echo ""
-echo "KubeSphere 相关 Pods:"
-kubectl get pods -n kubesphere-system 2>/dev/null || echo "KubeSphere 系统还在启动中..."
+echo "Dashboard 相关 Pods:"
+kubectl get pods -n kubernetes-dashboard
 
 echo ""
 echo "================================================================"
@@ -511,30 +811,32 @@ kubeadm token create --print-join-command
 echo "================================================================"
 
 echo ""
-echo "📊 KubeSphere 控制台："
-echo "地址: http://$LOCAL_IP:30880"
-echo "用户: admin"
-echo "密码: P@88w0rd"
+echo "📊 Kubernetes Dashboard 控制台："
+echo "地址: https://$LOCAL_IP:30443"
+echo "登录方式: Token"
+echo "访问令牌:"
+echo "$TOKEN"
 
 echo ""
 echo "🔍 监控命令："
 echo "kubectl get pods --all-namespaces                              # 查看所有 Pod"
-echo "kubectl get svc -n kubesphere-system                           # 查看 KubeSphere 服务"
-echo "kubectl logs -n kubesphere-system deployment/ks-installer -f   # KubeSphere 安装日志"
+echo "kubectl get svc -n kubernetes-dashboard                        # 查看 Dashboard 服务"
+echo "kubectl -n kubernetes-dashboard create token admin-user        # 重新生成访问令牌"
+echo "kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d  # 获取永久令牌"
 echo "systemctl status kubelet                                       # kubelet 状态"
 echo "systemctl status containerd                                    # containerd 状态"
 echo "crictl ps                                                      # 容器列表"
 
 echo ""
 echo "⚠️  重要提醒："
-echo "1. KubeSphere 完全启动需要 10-15 分钟，请耐心等待"
-echo "2. 如果是云服务器，请确保防火墙开放以下端口："
+echo "1. Dashboard 使用 HTTPS，浏览器会提示证书警告，点击'高级'->'继续访问'即可"
+echo "2. 登录时选择 'Token' 方式，粘贴上面显示的访问令牌"
+echo "3. 如果是云服务器，请确保防火墙开放以下端口："
 echo "   - 6443 (Kubernetes API)"
 echo "   - 30000-32767 (NodePort 服务)"
-echo "   - 30880 (KubeSphere 控制台)"
-echo "3. 首次登录 KubeSphere 后请及时修改默认密码"
-echo "4. 可以通过以下命令检查 KubeSphere 安装状态："
-echo "   kubectl get pods -n kubesphere-system"
+echo "   - 30443 (Kubernetes Dashboard)"
+echo "4. 如需重新生成令牌，运行："
+echo "   kubectl -n kubernetes-dashboard create token admin-user"
 
 echo ""
-echo "✅ 脚本执行完毕！请等待所有组件完全启动。"
+echo "✅ 脚本执行完毕！Kubernetes 集群和 Dashboard 已准备就绪。"
