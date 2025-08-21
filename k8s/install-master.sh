@@ -1,9 +1,9 @@
 #!/bin/bash
-# Kubernetes + Dashboard 简化安装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
+# Kubernetes + Dashboard 安装脚本 - 支持公网和内网访问
 set -e
 
-echo "🚀 Kubernetes + Dashboard 简化安装脚本 v1.0"
-echo "支持 Ubuntu/Debian/CentOS/RHEL 系统"
+echo "🚀 Kubernetes + Dashboard 安装脚本 v2.0"
+echo "支持公网和内网节点加入"
 
 # 检查是否为 root 用户
 if [[ $EUID -ne 0 ]]; then
@@ -11,6 +11,69 @@ if [[ $EUID -ne 0 ]]; then
    echo "请使用: sudo $0"
    exit 1
 fi
+
+# 获取 IP 地址
+get_ip_addresses() {
+    echo ""
+    echo "🌐 检测 IP 地址..."
+    
+    # 获取内网 IP（默认网卡的第一个 IP）
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    echo "内网 IP: $LOCAL_IP"
+    
+    # 尝试获取公网 IP
+    echo "正在获取公网 IP..."
+    PUBLIC_IP=""
+    
+    # 方法1：通过 curl 获取
+    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)
+    
+    # 方法2：如果方法1失败，尝试其他服务
+    if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP=$(curl -s --connect-timeout 5 icanhazip.com 2>/dev/null || true)
+    fi
+    
+    # 方法3：如果还是失败，尝试另一个
+    if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP=$(curl -s --connect-timeout 5 api.ipify.org 2>/dev/null || true)
+    fi
+    
+    if [ -n "$PUBLIC_IP" ]; then
+        echo "公网 IP: $PUBLIC_IP"
+    else
+        echo "⚠️  无法自动检测公网 IP"
+        read -p "请手动输入公网 IP（如果没有请直接回车）: " PUBLIC_IP
+    fi
+    
+    # 让用户确认或修改
+    echo ""
+    echo "📝 请确认 IP 地址配置："
+    echo "1. 内网 IP: $LOCAL_IP"
+    if [ -n "$PUBLIC_IP" ]; then
+        echo "2. 公网 IP: $PUBLIC_IP"
+    fi
+    echo ""
+    read -p "IP 地址是否正确？[Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]] && [ -n "$REPLY" ]; then
+        read -p "请输入正确的内网 IP: " LOCAL_IP
+        read -p "请输入正确的公网 IP（没有则回车）: " PUBLIC_IP
+    fi
+    
+    # 构建证书 SAN 列表
+    CERT_SANS="$LOCAL_IP"
+    if [ -n "$PUBLIC_IP" ]; then
+        CERT_SANS="$PUBLIC_IP,$LOCAL_IP"
+    fi
+    
+    echo ""
+    echo "✅ 将使用以下 IP 配置："
+    echo "   内网 IP: $LOCAL_IP"
+    if [ -n "$PUBLIC_IP" ]; then
+        echo "   公网 IP: $PUBLIC_IP"
+    fi
+    echo "   证书 SANs: $CERT_SANS"
+}
 
 # 检测系统类型
 detect_os() {
@@ -215,6 +278,9 @@ echo "📋 系统信息："
 echo "操作系统: $OS $OS_VERSION"
 echo "包管理器: $PKG_MANAGER"
 
+# 获取 IP 配置
+get_ip_addresses
+
 # 清理旧安装
 cleanup_old_k8s
 
@@ -285,20 +351,19 @@ pull-image-on-create: false
 EOF
 
 echo ""
-echo "🎯 [8/10] 初始化 Kubernetes 集群..."
-
-# 获取本机 IP
-LOCAL_IP=$(hostname -I | awk '{print $1}')
-echo "使用 IP 地址: $LOCAL_IP"
+echo "🎯 [8/10] 初始化 Kubernetes 集群（支持多 IP）..."
 
 # 拉取必要的镜像
 echo "预拉取 Kubernetes 镜像..."
 kubeadm config images pull --cri-socket unix:///var/run/containerd/containerd.sock
 
-# 初始化集群
+# 初始化集群（关键：添加 --apiserver-cert-extra-sans 参数）
 echo "正在初始化集群..."
+echo "配置证书 SANs: $CERT_SANS"
+
 kubeadm init \
     --apiserver-advertise-address=$LOCAL_IP \
+    --apiserver-cert-extra-sans=$CERT_SANS \
     --pod-network-cidr=10.244.0.0/16 \
     --service-cidr=10.96.0.0/12 \
     --cri-socket=unix:///var/run/containerd/containerd.sock \
@@ -370,6 +435,11 @@ kubectl wait --for=condition=available --timeout=300s deployment/kubernetes-dash
 sleep 5
 K8S_TOKEN=$(kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d 2>/dev/null || kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || echo "Token生成失败")
 
+# 生成 join 命令
+echo ""
+echo "生成 Worker 节点加入命令..."
+JOIN_COMMAND=$(kubeadm token create --print-join-command)
+
 echo ""
 echo "=========================================="
 echo "🎉 Kubernetes 集群安装完成！"
@@ -386,10 +456,25 @@ echo "🔑 访问信息"
 echo "=========================================="
 echo ""
 echo "📍 Kubernetes Dashboard 地址:"
-echo "   https://$LOCAL_IP:30443"
+echo "   内网访问: https://$LOCAL_IP:30443"
+if [ -n "$PUBLIC_IP" ]; then
+    echo "   公网访问: https://$PUBLIC_IP:30443"
+fi
 echo ""
 echo "🔐 登录令牌:"
 echo "   $K8S_TOKEN"
+echo ""
+echo "=========================================="
+echo "🔗 Worker 节点加入方式"
+echo "=========================================="
+echo ""
+if [ -n "$PUBLIC_IP" ]; then
+    echo "📌 公网节点加入（不在同一内网）:"
+    echo "   ${JOIN_COMMAND//$LOCAL_IP/$PUBLIC_IP}"
+    echo ""
+fi
+echo "📌 内网节点加入（同一内网）:"
+echo "   $JOIN_COMMAND"
 echo ""
 echo "=========================================="
 echo "💡 常用命令"
@@ -407,6 +492,9 @@ echo ""
 echo "重新生成访问令牌:"
 echo "  kubectl -n kubernetes-dashboard create token admin-user"
 echo ""
+echo "重新生成加入命令:"
+echo "  kubeadm token create --print-join-command"
+echo ""
 echo "查看集群信息:"
 echo "  kubectl cluster-info"
 echo ""
@@ -421,8 +509,13 @@ echo "2. 如果是云服务器，请确保防火墙开放端口:"
 echo "   - 6443 (Kubernetes API)"
 echo "   - 30443 (Dashboard)"
 echo ""
-echo "3. Worker 节点加入命令:"
-kubeadm token create --print-join-command
+echo "3. 证书已配置支持以下 IP 访问:"
+echo "   - 内网: $LOCAL_IP"
+if [ -n "$PUBLIC_IP" ]; then
+    echo "   - 公网: $PUBLIC_IP"
+fi
+echo ""
+echo "4. Token 有效期为 24 小时，过期后需重新生成"
 echo ""
 echo "=========================================="
 echo "✅ 安装完成！"
