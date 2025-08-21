@@ -425,7 +425,7 @@ install_kubernetes
 systemctl enable kubelet
 
 echo ""
-echo "🔧 [7/12] 配置 CRI 接口..."
+echo "🔧 [7/13] 配置 CRI 接口..."
 
 # 安装 cri-tools
 case $PKG_MANAGER in
@@ -447,11 +447,11 @@ pull-image-on-create: false
 EOF
 
 echo ""
-echo "🛠️ [8/12] 安装 Helm..."
+echo "🛠️ [8/13] 安装 Helm..."
 install_helm
 
 echo ""
-echo "🔍 [9/12] 验证安装..."
+echo "🔍 [9/13] 验证安装..."
 
 echo "containerd 版本:"
 containerd --version
@@ -476,7 +476,7 @@ echo "测试 CRI 连接:"
 crictl info | head -20
 
 echo ""
-echo "🎯 [10/12] 初始化 Kubernetes 集群..."
+echo "🎯 [10/13] 初始化 Kubernetes 集群..."
 
 # 获取本机 IP
 LOCAL_IP=$(hostname -I | awk '{print $1}')
@@ -836,27 +836,9 @@ if [ "$INSTALL_RANCHER" = true ]; then
     # 创建 cattle-system 命名空间
     kubectl create namespace cattle-system 2>/dev/null || true
     
-    # 使用 Helm 安装 Rancher
-    helm repo add rancher-latest https://releases.rancher.com/server-charts/latest 2>/dev/null || true
-    helm repo update
-    
-    # 安装 Rancher
-    helm upgrade --install rancher rancher-latest/rancher \
-        --namespace cattle-system \
-        --set hostname=rancher.local \
-        --set bootstrapPassword=admin123456 \
-        --set ingress.tls.source=rancher \
-        --set replicas=1 \
-        --wait --timeout=10m || {
-        
-        echo "Helm 安装失败，使用备用方式安装 Rancher..."
-        # 备用方式：直接部署
-        cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: cattle-system
----
+    # 使用简化版 Rancher 部署（不需要 cert-manager）
+    echo "部署简化版 Rancher..."
+    cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -885,12 +867,26 @@ spec:
           value: "admin123456"
         - name: CATTLE_PASSWORD_MIN_LENGTH
           value: "8"
+        - name: CATTLE_SERVER_URL
+          value: "https://rancher.local"
+        args:
+        - "--http-listen-port=80"
+        - "--https-listen-port=443"
+        - "--add-local=true"
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"
         volumeMounts:
         - name: rancher-data
           mountPath: /var/lib/rancher
       volumes:
       - name: rancher-data
         emptyDir: {}
+      restartPolicy: Always
 ---
 apiVersion: v1
 kind: Service
@@ -913,14 +909,16 @@ spec:
   selector:
     app: rancher
 EOF
-    }
     
     # 等待 Rancher 启动
     echo "等待 Rancher 启动..."
-    kubectl wait --for=condition=available --timeout=600s deployment/rancher -n cattle-system || true
+    kubectl wait --for=condition=available --timeout=600s deployment/rancher -n cattle-system || {
+        echo "Rancher 启动超时，检查状态..."
+        kubectl get pods -n cattle-system
+        kubectl describe pod -n cattle-system -l app=rancher
+    }
     
-    # 配置 Rancher 服务为 NodePort
-    kubectl patch svc rancher -n cattle-system -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":80,"targetPort":80,"nodePort":30080},{"name":"https","port":443,"targetPort":443,"nodePort":30444}]}}' 2>/dev/null || true
+    echo "Rancher 部署完成！"
 fi
 
 echo ""
