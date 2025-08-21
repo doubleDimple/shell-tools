@@ -1,8 +1,8 @@
 #!/bin/bash
-# Kubernetes + Dashboard 完全重装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
+# Kubernetes + 多控制台选择安装脚本 - 支持 Ubuntu/Debian/CentOS/RHEL
 set -e
 
-echo "🚀 Kubernetes + Dashboard 完全重装脚本 v5.0"
+echo "🚀 Kubernetes + 多控制台选择安装脚本 v6.0"
 echo "支持 Ubuntu/Debian/CentOS/RHEL 系统 - 强制清理重装"
 
 # 检查是否为 root 用户
@@ -296,6 +296,42 @@ install_helm() {
     helm version
 }
 
+# 选择控制台类型
+choose_dashboard() {
+    echo ""
+    echo "🎯 选择要安装的控制台："
+    echo "1) Kubernetes Dashboard (官方，轻量级，Token 登录)"
+    echo "2) Rancher (开源版，功能完整，图形化用户管理)"
+    echo "3) 同时安装两个控制台"
+    echo ""
+    while true; do
+        read -p "请选择 [1-3]: " DASHBOARD_CHOICE
+        case $DASHBOARD_CHOICE in
+            1)
+                INSTALL_K8S_DASHBOARD=true
+                INSTALL_RANCHER=false
+                echo "✅ 已选择：Kubernetes Dashboard"
+                break
+                ;;
+            2)
+                INSTALL_K8S_DASHBOARD=false
+                INSTALL_RANCHER=true
+                echo "✅ 已选择：Rancher"
+                break
+                ;;
+            3)
+                INSTALL_K8S_DASHBOARD=true
+                INSTALL_RANCHER=true
+                echo "✅ 已选择：同时安装两个控制台"
+                break
+                ;;
+            *)
+                echo "❌ 无效选择，请输入 1、2 或 3"
+                ;;
+        esac
+    done
+}
+
 # 开始安装
 detect_os
 
@@ -307,16 +343,19 @@ if [ -n "$CODENAME" ]; then
     echo "代码名: $CODENAME"
 fi
 
+# 选择控制台
+choose_dashboard
+
 # 强制清理
 force_cleanup
 
 echo ""
-echo "📦 [2/12] 更新系统并安装依赖..."
+echo "📦 [2/13] 更新系统并安装依赖..."
 update_system
 install_basic_packages
 
 echo ""
-echo "🔧 [3/12] 配置内核参数..."
+echo "🔧 [3/13] 配置内核参数..."
 # 配置内核模块
 cat <<EOF | tee /etc/modules-load.d/k8s.conf
 overlay
@@ -346,11 +385,11 @@ swapoff -a
 sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
 echo ""
-echo "🐳 [4/12] 安装 containerd..."
+echo "🐳 [4/13] 安装 containerd..."
 install_containerd
 
 echo ""
-echo "🔧 [5/12] 配置 containerd..."
+echo "🔧 [5/13] 配置 containerd..."
 
 # 停止 containerd 服务
 systemctl stop containerd 2>/dev/null || true
@@ -379,7 +418,7 @@ echo "验证 containerd 状态:"
 systemctl status containerd --no-pager
 
 echo ""
-echo "☸️  [6/12] 安装 Kubernetes 1.29..."
+echo "☸️  [6/13] 安装 Kubernetes 1.29..."
 install_kubernetes
 
 # 启动 kubelet
@@ -466,7 +505,7 @@ chown $(id -u):$(id -g) $HOME/.kube/config
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
 
 echo ""
-echo "🌐 [11/12] 安装网络插件..."
+echo "🌐 [11/13] 安装网络插件..."
 
 # 安装 Flannel
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
@@ -476,14 +515,15 @@ echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s || true
 
 echo ""
-echo "📊 [12/12] 安装 Kubernetes Dashboard..."
+echo "📊 [12/13] 安装控制台..."
 
-# 安装 Kubernetes Dashboard
-echo "安装 Kubernetes Dashboard..."
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml || {
-    echo "GitHub 下载失败，使用备用方式..."
-    # 备用方式：内联配置
-    cat <<EOF | kubectl apply -f -
+# 安装 Kubernetes Dashboard（如果选择）
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo "安装 Kubernetes Dashboard..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml || {
+        echo "GitHub 下载失败，使用备用方式..."
+        # 备用方式：内联配置
+        cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -739,24 +779,251 @@ spec:
         - name: tmp-volume
           emptyDir: {}
 EOF
-}
+    }
 
-# 等待 Dashboard 启动
-echo "等待 Dashboard 启动..."
-kubectl wait --for=condition=available --timeout=300s deployment/kubernetes-dashboard -n kubernetes-dashboard || true
+    # 等待 Dashboard 启动
+    echo "等待 Dashboard 启动..."
+    kubectl wait --for=condition=available --timeout=300s deployment/kubernetes-dashboard -n kubernetes-dashboard || true
 
-# 修改服务类型为 NodePort
-echo "配置 Dashboard 外部访问..."
-kubectl patch svc kubernetes-dashboard -n kubernetes-dashboard -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8443,"nodePort":30443}]}}' 2>/dev/null || true
+    # 修改服务类型为 NodePort
+    echo "配置 Dashboard 外部访问..."
+    kubectl patch svc kubernetes-dashboard -n kubernetes-dashboard -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8443,"nodePort":30443}]}}' 2>/dev/null || true
 
-# 创建管理员用户
-echo "创建管理员用户..."
-cat <<EOF | kubectl apply -f -
+    # 创建管理员用户
+    echo "创建 Kubernetes Dashboard 管理员用户..."
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: admin-user
   namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: admin-user-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: admin-user
+type: kubernetes.io/service-account-token
+EOF
+
+    # 等待 Secret 创建完成
+    sleep 5
+
+    # 生成访问令牌
+    echo "获取 Kubernetes Dashboard 访问令牌..."
+    K8S_TOKEN=$(kubectl get secret admin-user-token -n kubernetes-dashboard -o jsonpath='{.data.token}' | base64 -d 2>/dev/null || kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || echo "Token生成失败")
+fi
+
+# 安装 Rancher（如果选择）
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo "安装 Rancher..."
+    
+    # 创建 cattle-system 命名空间
+    kubectl create namespace cattle-system 2>/dev/null || true
+    
+    # 使用 Helm 安装 Rancher
+    helm repo add rancher-latest https://releases.rancher.com/server-charts/latest 2>/dev/null || true
+    helm repo update
+    
+    # 安装 Rancher
+    helm upgrade --install rancher rancher-latest/rancher \
+        --namespace cattle-system \
+        --set hostname=rancher.local \
+        --set bootstrapPassword=admin123456 \
+        --set ingress.tls.source=rancher \
+        --set replicas=1 \
+        --wait --timeout=10m || {
+        
+        echo "Helm 安装失败，使用备用方式安装 Rancher..."
+        # 备用方式：直接部署
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cattle-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rancher
+  template:
+    metadata:
+      labels:
+        app: rancher
+    spec:
+      containers:
+      - name: rancher
+        image: rancher/rancher:latest
+        ports:
+        - containerPort: 80
+        - containerPort: 443
+        env:
+        - name: CATTLE_BOOTSTRAP_PASSWORD
+          value: "admin123456"
+        - name: CATTLE_PASSWORD_MIN_LENGTH
+          value: "8"
+        volumeMounts:
+        - name: rancher-data
+          mountPath: /var/lib/rancher
+      volumes:
+      - name: rancher-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rancher
+  namespace: cattle-system
+  labels:
+    app: rancher
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+  - name: https
+    port: 443
+    targetPort: 443
+    nodePort: 30444
+  selector:
+    app: rancher
+EOF
+    }
+    
+    # 等待 Rancher 启动
+    echo "等待 Rancher 启动..."
+    kubectl wait --for=condition=available --timeout=600s deployment/rancher -n cattle-system || true
+    
+    # 配置 Rancher 服务为 NodePort
+    kubectl patch svc rancher -n cattle-system -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":80,"targetPort":80,"nodePort":30080},{"name":"https","port":443,"targetPort":443,"nodePort":30444}]}}' 2>/dev/null || true
+fi
+
+echo ""
+echo "🔧 [13/13] 配置完成..."
+
+echo ""
+echo "🎉 Kubernetes 集群安装完成！"
+echo "================================================================"
+
+# 显示集群状态
+echo "集群节点状态:"
+kubectl get nodes -o wide
+
+echo ""
+echo "系统 Pods 状态:"
+kubectl get pods -n kube-system
+
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo ""
+    echo "Kubernetes Dashboard Pods:"
+    kubectl get pods -n kubernetes-dashboard
+fi
+
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo ""
+    echo "Rancher Pods:"
+    kubectl get pods -n cattle-system
+fi
+
+echo ""
+echo "================================================================"
+echo "🔑 Worker 节点加入命令："
+kubeadm token create --print-join-command
+echo "================================================================"
+
+echo ""
+echo "📊 控制台访问信息："
+
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo ""
+    echo "🎯 Kubernetes Dashboard:"
+    echo "地址: https://$LOCAL_IP:30443"
+    echo "登录方式: Token"
+    echo "访问令牌:"
+    echo "$K8S_TOKEN"
+fi
+
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo ""
+    echo "🎯 Rancher 控制台:"
+    echo "地址: https://$LOCAL_IP:30444"
+    echo "备用地址: http://$LOCAL_IP:30080"
+    echo "初始用户名: admin"
+    echo "初始密码: admin123456"
+    echo "⚠️  首次登录后请设置新密码"
+fi
+
+echo ""
+echo "🔍 监控命令："
+echo "kubectl get pods --all-namespaces                              # 查看所有 Pod"
+
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo "kubectl get svc -n kubernetes-dashboard                        # 查看 Dashboard 服务"
+    echo "kubectl -n kubernetes-dashboard create token admin-user        # 重新生成 Dashboard 令牌"
+fi
+
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo "kubectl get svc -n cattle-system                               # 查看 Rancher 服务"
+    echo "kubectl logs -n cattle-system deployment/rancher -f            # 查看 Rancher 日志"
+fi
+
+echo "systemctl status kubelet                                       # kubelet 状态"
+echo "systemctl status containerd                                    # containerd 状态"
+echo "crictl ps                                                      # 容器列表"
+
+echo ""
+echo "⚠️  重要提醒："
+echo "1. 控制台使用 HTTPS，浏览器会提示证书警告，点击'高级'->'继续访问'即可"
+
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo "2. Kubernetes Dashboard 使用 Token 登录，安全性更高"
+fi
+
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo "3. Rancher 支持图形化用户管理，可以在界面直接添加用户"
+    echo "4. Rancher 完全启动需要 5-10 分钟，请耐心等待"
+fi
+
+echo "5. 如果是云服务器，请确保防火墙开放以下端口："
+echo "   - 6443 (Kubernetes API)"
+echo "   - 30000-32767 (NodePort 服务)"
+
+if [ "$INSTALL_K8S_DASHBOARD" = true ]; then
+    echo "   - 30443 (Kubernetes Dashboard)"
+fi
+
+if [ "$INSTALL_RANCHER" = true ]; then
+    echo "   - 30080 (Rancher HTTP)"
+    echo "   - 30444 (Rancher HTTPS)"
+fi
+
+echo ""
+echo "✅ 脚本执行完毕！集群和控制台已准备就绪。"-dashboard
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
