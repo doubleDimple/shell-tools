@@ -302,10 +302,9 @@ choose_dashboard() {
     echo "🎯 选择要安装的控制台："
     echo "1) Kubernetes Dashboard (官方，轻量级，Token 登录)"
     echo "2) Rancher (开源版，功能完整，图形化用户管理)"
-    echo "3) 同时安装两个控制台"
     echo ""
     while true; do
-        read -p "请选择 [1-3]: " DASHBOARD_CHOICE
+        read -p "请选择 [1-2]: " DASHBOARD_CHOICE
         case $DASHBOARD_CHOICE in
             1)
                 INSTALL_K8S_DASHBOARD=true
@@ -319,14 +318,8 @@ choose_dashboard() {
                 echo "✅ 已选择：Rancher"
                 break
                 ;;
-            3)
-                INSTALL_K8S_DASHBOARD=true
-                INSTALL_RANCHER=true
-                echo "✅ 已选择：同时安装两个控制台"
-                break
-                ;;
             *)
-                echo "❌ 无效选择，请输入 1、2 或 3"
+                echo "❌ 无效选择，请输入 1 或 2"
                 ;;
         esac
     done
@@ -513,6 +506,23 @@ kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/
 # 等待节点就绪
 echo "等待节点就绪..."
 kubectl wait --for=condition=Ready node --all --timeout=300s || true
+
+# 检查 Flannel 网络状态
+echo "检查网络插件状态..."
+kubectl wait --for=condition=available --timeout=180s deployment/coredns -n kube-system || true
+
+# 确保 Flannel 正常运行
+echo "验证 Flannel 网络..."
+sleep 30
+FLANNEL_READY=$(kubectl get pods -n kube-flannel --no-headers | grep Running | wc -l)
+if [ "$FLANNEL_READY" -eq 0 ]; then
+    echo "⚠️  Flannel 未正常启动，重新部署..."
+    kubectl delete pods -n kube-flannel --all 2>/dev/null || true
+    sleep 15
+    kubectl wait --for=condition=Ready --timeout=120s pod -l app=flannel -n kube-flannel || true
+fi
+
+echo "✅ 网络插件配置完成"
 
 echo ""
 echo "📊 [12/13] 安装控制台..."
@@ -836,8 +846,27 @@ if [ "$INSTALL_RANCHER" = true ]; then
     # 创建 cattle-system 命名空间
     kubectl create namespace cattle-system 2>/dev/null || true
     
-    # 使用简化版 Rancher 部署（不需要 cert-manager）
-    echo "部署简化版 Rancher..."
+    # 检查网络是否就绪
+    echo "检查网络连接..."
+    NETWORK_READY=false
+    for i in {1..5}; do
+        if kubectl run network-test --image=busybox --rm -i --restart=Never -- nslookup kubernetes.default > /dev/null 2>&1; then
+            NETWORK_READY=true
+            break
+        fi
+        echo "网络检查第 $i 次失败，等待重试..."
+        sleep 10
+    done
+    
+    if [ "$NETWORK_READY" = false ]; then
+        echo "⚠️  网络连接异常，重启网络组件..."
+        kubectl delete pods -n kube-flannel --all 2>/dev/null || true
+        kubectl delete pods -n kube-system -l k8s-app=kube-dns 2>/dev/null || true
+        sleep 30
+    fi
+    
+    # 使用简化版 Rancher 部署
+    echo "部署 Rancher..."
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -858,7 +887,7 @@ spec:
     spec:
       containers:
       - name: rancher
-        image: rancher/rancher:latest
+        image: rancher/rancher:v2.7.9
         ports:
         - containerPort: 80
         - containerPort: 443
@@ -875,14 +904,26 @@ spec:
         - "--add-local=true"
         resources:
           limits:
-            cpu: "2"
-            memory: "4Gi"
-          requests:
             cpu: "1"
             memory: "2Gi"
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
         volumeMounts:
         - name: rancher-data
           mountPath: /var/lib/rancher
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
       volumes:
       - name: rancher-data
         emptyDir: {}
@@ -910,15 +951,34 @@ spec:
     app: rancher
 EOF
     
-    # 等待 Rancher 启动
+    # 等待 Rancher 启动（更智能的等待）
     echo "等待 Rancher 启动..."
-    kubectl wait --for=condition=available --timeout=600s deployment/rancher -n cattle-system || {
-        echo "Rancher 启动超时，检查状态..."
+    echo "这可能需要 3-5 分钟，请耐心等待..."
+    
+    # 等待 Pod 创建
+    kubectl wait --for=condition=PodReadyToStartContainers --timeout=300s pod -l app=rancher -n cattle-system 2>/dev/null || {
+        echo "Pod 创建超时，检查状态..."
         kubectl get pods -n cattle-system
-        kubectl describe pod -n cattle-system -l app=rancher
+        kubectl describe pod -l app=rancher -n cattle-system | tail -20
     }
     
-    echo "Rancher 部署完成！"
+    # 等待容器就绪
+    kubectl wait --for=condition=Ready --timeout=600s pod -l app=rancher -n cattle-system 2>/dev/null || {
+        echo "容器启动超时，检查日志..."
+        kubectl get pods -n cattle-system
+        kubectl logs -n cattle-system -l app=rancher --tail=50 2>/dev/null || echo "日志暂不可用"
+    }
+    
+    # 检查最终状态
+    RANCHER_STATUS=$(kubectl get pods -n cattle-system -l app=rancher --no-headers 2>/dev/null | awk '{print $3}' | head -1)
+    if [ "$RANCHER_STATUS" = "Running" ]; then
+        echo "✅ Rancher 启动成功！"
+    else
+        echo "⚠️  Rancher 启动可能需要更多时间，当前状态: $RANCHER_STATUS"
+        echo "可以运行以下命令检查进度："
+        echo "kubectl get pods -n cattle-system"
+        echo "kubectl logs -n cattle-system deployment/rancher -f"
+    fi
 fi
 
 echo ""
