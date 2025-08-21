@@ -1,8 +1,8 @@
 #!/bin/bash
-# Kubernetes Worker 节点安装脚本 - 兼容 Master 节点版本
+# Kubernetes Worker 节点安装脚本 - 修复版（无需 cri-tools 包）
 set -e
 
-echo "🚀 Kubernetes Worker 节点安装脚本 v1.0"
+echo "🚀 Kubernetes Worker 节点安装脚本 v1.1"
 echo "兼容 Kubernetes 1.29 版本"
 
 # 检查是否为 root 用户
@@ -129,8 +129,8 @@ systemctl restart containerd
 sleep 5
 
 echo ""
-echo "[6/7] 配置 CRI 工具..."
-# 下载并安装 crictl（cri-tools）
+echo "[6/7] 安装和配置 crictl..."
+# 直接从 GitHub 下载 crictl 二进制文件
 CRICTL_VERSION="v1.29.0"
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
@@ -139,20 +139,31 @@ elif [ "$ARCH" = "aarch64" ]; then
     ARCH="arm64"
 fi
 
-echo "下载 crictl ${CRICTL_VERSION}..."
-wget -q "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" || {
-    echo "下载失败，尝试备用地址..."
-    curl -L -o "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" \
-        "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
-}
+echo "下载 crictl ${CRICTL_VERSION} for ${ARCH}..."
+CRICTL_URL="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+
+# 尝试下载
+if command -v wget >/dev/null 2>&1; then
+    wget -q "$CRICTL_URL" -O crictl.tar.gz || {
+        echo "wget 下载失败，尝试 curl..."
+        curl -L "$CRICTL_URL" -o crictl.tar.gz
+    }
+elif command -v curl >/dev/null 2>&1; then
+    curl -L "$CRICTL_URL" -o crictl.tar.gz
+else
+    echo "❌ 需要 wget 或 curl 来下载 crictl"
+    exit 1
+fi
 
 # 解压并安装
-tar -C /usr/local/bin -xzf "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+tar -C /usr/local/bin -xzf crictl.tar.gz
 chmod +x /usr/local/bin/crictl
-rm -f "crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz"
+rm -f crictl.tar.gz
 
-# 创建软链接
-ln -sf /usr/local/bin/crictl /usr/bin/crictl 2>/dev/null || true
+# 创建软链接（如果 /usr/local/bin 不在 PATH 中）
+if ! command -v crictl >/dev/null 2>&1; then
+    ln -sf /usr/local/bin/crictl /usr/bin/crictl
+fi
 
 # 配置 crictl
 cat > /etc/crictl.yaml << EOF
@@ -163,20 +174,21 @@ debug: false
 pull-image-on-create: false
 EOF
 
-echo "crictl 安装完成: $(crictl --version)"
+echo "crictl 安装完成: $(crictl --version 2>/dev/null || echo 'crictl 已安装')"
 
 echo ""
-echo "[7/7] 安装 Kubernetes 组件 (v1.29.0，与 Master 一致)..."
+echo "[7/7] 安装 Kubernetes 组件 (v1.29.0)..."
 if [ "$PKG_MANAGER" = "apt" ]; then
-    # 使用新的 Kubernetes 仓库（与 Master 节点保持一致）
+    # 添加 Kubernetes 仓库
+    mkdir -p /etc/apt/keyrings
     curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
     apt update
-    # 安装特定版本，与 Master 节点一致
+    # 安装特定版本
     apt install -y kubelet=1.29.0-1.1 kubeadm=1.29.0-1.1 kubectl=1.29.0-1.1
     apt-mark hold kubelet kubeadm kubectl
 elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-    # 使用新的 Kubernetes 仓库
+    # 添加 Kubernetes 仓库
     cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
@@ -198,10 +210,11 @@ echo "✅ Worker 节点准备完成！"
 echo "=========================================="
 echo ""
 echo "📋 已安装组件版本："
-echo "Containerd: $(containerd --version)"
-echo "Kubeadm: $(kubeadm version -o short)"
-echo "Kubelet: $(kubelet --version)"
-echo "Kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client)"
+echo "Containerd: $(containerd --version 2>/dev/null || echo '已安装')"
+echo "Crictl: $(crictl --version 2>/dev/null || /usr/local/bin/crictl --version 2>/dev/null || echo '已安装')"
+echo "Kubeadm: $(kubeadm version -o short 2>/dev/null || echo '已安装')"
+echo "Kubelet: $(kubelet --version 2>/dev/null || echo '已安装')"
+echo "Kubectl: $(kubectl version --client --short 2>/dev/null || kubectl version --client 2>/dev/null | head -1 || echo '已安装')"
 echo ""
 echo "=========================================="
 echo "📌 下一步操作："
@@ -235,8 +248,13 @@ echo ""
 echo "查看 containerd 状态："
 echo "  systemctl status containerd"
 echo ""
-echo "测试 containerd："
+echo "测试 containerd 和 crictl："
 echo "  crictl version"
 echo "  crictl info"
 echo ""
-echo "==========================================
+echo "重置节点（如果需要重新加入）："
+echo "  kubeadm reset"
+echo "  rm -rf /etc/cni/net.d"
+echo "  systemctl restart containerd kubelet"
+echo ""
+echo "=========================================="
