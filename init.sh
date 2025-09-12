@@ -163,11 +163,31 @@ install_docker() {
         # 安装必要的依赖
         sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
         
-        # 添加Docker官方GPG密钥
-        curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        
-        # 添加Docker仓库
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        # 根据系统类型设置正确的仓库
+        if [[ "$ID" == "ubuntu" ]]; then
+            # Ubuntu系统
+            log_info "配置Ubuntu Docker仓库..."
+            
+            # 添加Docker官方GPG密钥
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            
+            # 添加Docker仓库
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+        elif [[ "$ID" == "debian" ]]; then
+            # Debian系统
+            log_info "配置Debian Docker仓库..."
+            
+            # 添加Docker官方GPG密钥
+            curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            
+            # 添加Docker仓库
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+        else
+            log_error "不支持的系统类型: $ID"
+            return 1
+        fi
         
         # 更新包索引
         sudo apt update -y
