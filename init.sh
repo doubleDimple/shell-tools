@@ -410,11 +410,23 @@ show_completion() {
     fi
     echo "  ✓ 系统软件包更新"
     echo "  ✓ 必要组件安装"
-    echo "  ✓ Docker安装"
-    echo "  ✓ Docker Compose检查"
+    
+    if command -v docker &> /dev/null; then
+        echo "  ✓ Docker安装成功"
+    else
+        echo "  ✗ Docker安装失败"
+    fi
+    
+    if docker compose version &> /dev/null || command -v docker-compose &> /dev/null; then
+        echo "  ✓ Docker Compose可用"
+    else
+        echo "  ✗ Docker Compose不可用"
+    fi
+    
     echo "  ✓ 时区设置为Asia/Shanghai"
     echo "  ✓ 彩色命令行配置"
     echo
+    
     log_warn "请运行以下命令使配置生效:"
     echo "  source ~/.bashrc"
     if [[ $EUID -ne 0 ]] && command -v docker &> /dev/null; then
@@ -428,12 +440,23 @@ show_completion() {
     log_info "安装的软件版本:"
     if command -v docker &> /dev/null; then
         echo "  Docker: $(docker --version)"
+        
+        # 检查Docker服务状态
+        if systemctl is-active --quiet docker; then
+            echo "  Docker服务: ✓ 运行中"
+        else
+            echo "  Docker服务: ✗ 未运行"
+        fi
+    else
+        echo "  Docker: ✗ 未安装"
     fi
     
     if docker compose version &> /dev/null; then
         echo "  Docker Compose Plugin: $(docker compose version --short)"
     elif command -v docker-compose &> /dev/null; then
         echo "  Docker Compose: $(docker-compose --version)"
+    else
+        echo "  Docker Compose: ✗ 不可用"
     fi
     
     echo
@@ -442,10 +465,18 @@ show_completion() {
     echo "  时区: $(timedatectl show --property=Timezone --value)"
     echo
     
-    log_info "快速使用Docker:"
-    echo "  sudo docker run hello-world  # 测试Docker"
-    echo "  docker ps                    # 查看运行的容器"
-    echo "  docker images                # 查看镜像"
+    if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+        log_info "Docker快速使用指南:"
+        echo "  sudo docker run hello-world     # 测试Docker"
+        echo "  docker ps                       # 查看运行的容器"
+        echo "  docker images                   # 查看镜像"
+        echo "  docker compose up -d            # 启动compose服务"
+    else
+        log_warn "Docker安装或启动失败，请检查错误信息"
+        log_info "可以尝试手动启动Docker:"
+        echo "  sudo systemctl start docker"
+        echo "  sudo systemctl enable docker"
+    fi
     echo
 }
 
