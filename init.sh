@@ -147,14 +147,30 @@ install_packages() {
     log_info "软件包安装完成"
 }
 
-# 安装Docker
+# 清理Docker配置（修复函数）
+clean_docker_repos() {
+    log_info "清理可能存在的错误Docker仓库配置..."
+    
+    # 删除可能存在的Docker仓库文件
+    sudo rm -f /etc/apt/sources.list.d/docker.list
+    sudo rm -f /etc/apt/sources.list.d/docker.list.save
+    sudo rm -f /usr/share/keyrings/docker-archive-keyring.gpg
+    
+    log_info "Docker仓库配置清理完成"
+}
+
+# 安装Docker（修复版本）
 install_docker() {
     log_step "检查并安装Docker..."
     
     if command -v docker &> /dev/null; then
         log_info "Docker已安装，版本: $(docker --version)"
+        return 0
     else
         log_info "安装Docker..."
+        
+        # 首先清理可能存在的错误配置
+        clean_docker_repos
         
         # 确保源配置正确后再安装Docker
         log_info "准备Docker安装环境..."
@@ -190,9 +206,11 @@ install_docker() {
         fi
         
         # 更新包索引
+        log_info "更新软件包列表..."
         sudo apt update -y
         
         # 安装Docker
+        log_info "安装Docker Engine..."
         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
         
         # 将当前用户添加到docker组（如果不是root用户）
@@ -206,31 +224,57 @@ install_docker() {
         sudo systemctl enable docker
         sudo systemctl start docker
         
-        log_info "Docker安装完成"
+        # 验证安装
+        if command -v docker &> /dev/null; then
+            log_info "Docker安装完成，版本: $(docker --version)"
+        else
+            log_error "Docker安装失败"
+            return 1
+        fi
     fi
 }
 
-# 安装Docker Compose
+# 安装Docker Compose（保持原有逻辑，因为新版Docker已包含compose插件）
 install_docker_compose() {
-    log_step "检查并安装Docker Compose..."
+    log_step "检查Docker Compose..."
     
+    # 检查docker compose插件（新版本）
+    if docker compose version &> /dev/null; then
+        log_info "Docker Compose Plugin已安装，版本: $(docker compose version)"
+        return 0
+    fi
+    
+    # 检查独立的docker-compose（旧版本）
     if command -v docker-compose &> /dev/null; then
         log_info "Docker Compose已安装，版本: $(docker-compose --version)"
+        return 0
+    fi
+    
+    # 如果都没有，安装独立版本
+    log_info "安装Docker Compose独立版本..."
+    
+    # 获取最新版本号
+    DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'"' -f4)
+    
+    if [[ -z "$DOCKER_COMPOSE_VERSION" ]]; then
+        log_warn "无法获取最新版本，使用默认版本"
+        DOCKER_COMPOSE_VERSION="v2.24.0"
+    fi
+    
+    log_info "下载Docker Compose $DOCKER_COMPOSE_VERSION..."
+    
+    # 下载Docker Compose
+    sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    
+    # 添加执行权限
+    sudo chmod +x /usr/local/bin/docker-compose
+    
+    # 验证安装
+    if command -v docker-compose &> /dev/null; then
+        log_info "Docker Compose安装完成，版本: $(docker-compose --version)"
     else
-        log_info "安装Docker Compose..."
-        # 下载最新版本的Docker Compose
-        sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-        
-        # 添加执行权限
-        sudo chmod +x /usr/local/bin/docker-compose
-        
-        # 验证安装
-        if command -v docker-compose &> /dev/null; then
-            log_info "Docker Compose安装完成，版本: $(docker-compose --version)"
-        else
-            log_error "Docker Compose安装失败"
-            return 1
-        fi
+        log_error "Docker Compose安装失败"
+        return 1
     fi
 }
 
@@ -271,8 +315,12 @@ setup_colorful_terminal() {
         fi
     fi
     
-    # 添加自定义彩色配置
-    cat >> ~/.bashrc << 'EOF'
+    # 检查是否已经添加过自定义配置
+    if grep -q "自定义彩色配置 (由init.sh添加)" ~/.bashrc; then
+        log_info "自定义彩色配置已存在"
+    else
+        # 添加自定义彩色配置
+        cat >> ~/.bashrc << 'EOF'
 
 # === 自定义彩色配置 (由init.sh添加) ===
 # 启用彩色提示符
@@ -316,15 +364,36 @@ alias path='echo -e ${PATH//:/\\n}'
 alias dps='docker ps'
 alias dpsa='docker ps -a'
 alias di='docker images'
-alias dc='docker-compose'
-alias dcup='docker-compose up -d'
-alias dcdown='docker-compose down'
-alias dclogs='docker-compose logs -f'
-alias dcps='docker-compose ps'
+alias dc='docker compose'
+alias dcup='docker compose up -d'
+alias dcdown='docker compose down'
+alias dclogs='docker compose logs -f'
+alias dcps='docker compose ps'
+
+# 传统docker-compose别名（兼容性）
+alias docker-compose-up='docker-compose up -d'
+alias docker-compose-down='docker-compose down'
+alias docker-compose-logs='docker-compose logs -f'
 
 EOF
+        log_info "自定义彩色配置添加完成"
+    fi
+}
+
+# 测试Docker安装
+test_docker() {
+    log_step "测试Docker安装..."
     
-    log_info "彩色命令行配置完成"
+    if command -v docker &> /dev/null; then
+        log_info "运行Docker测试..."
+        if sudo docker run --rm hello-world &> /dev/null; then
+            log_info "Docker测试成功！"
+        else
+            log_warn "Docker测试未通过，但Docker已安装"
+        fi
+    else
+        log_warn "Docker未安装，跳过测试"
+    fi
 }
 
 # 显示完成信息
@@ -335,11 +404,14 @@ show_completion() {
     log_info "======================================"
     echo
     log_info "已完成的配置:"
-    echo "  ✓ Debian软件源修复"
+    
+    if [[ "$ID" == "debian" ]]; then
+        echo "  ✓ Debian软件源修复"
+    fi
     echo "  ✓ 系统软件包更新"
     echo "  ✓ 必要组件安装"
     echo "  ✓ Docker安装"
-    echo "  ✓ Docker Compose安装"
+    echo "  ✓ Docker Compose检查"
     echo "  ✓ 时区设置为Asia/Shanghai"
     echo "  ✓ 彩色命令行配置"
     echo
@@ -351,16 +423,30 @@ show_completion() {
     echo
     log_warn "或者重新登录系统"
     echo
-    log_info "Docker信息:"
+    
+    # 显示版本信息
+    log_info "安装的软件版本:"
     if command -v docker &> /dev/null; then
-        docker --version
+        echo "  Docker: $(docker --version)"
     fi
-    if command -v docker-compose &> /dev/null; then
-        docker-compose --version
+    
+    if docker compose version &> /dev/null; then
+        echo "  Docker Compose Plugin: $(docker compose version --short)"
+    elif command -v docker-compose &> /dev/null; then
+        echo "  Docker Compose: $(docker-compose --version)"
     fi
+    
     echo
-    log_info "时间信息:"
-    timedatectl
+    log_info "系统时间信息:"
+    echo "  当前时间: $(date)"
+    echo "  时区: $(timedatectl show --property=Timezone --value)"
+    echo
+    
+    log_info "快速使用Docker:"
+    echo "  sudo docker run hello-world  # 测试Docker"
+    echo "  docker ps                    # 查看运行的容器"
+    echo "  docker images                # 查看镜像"
+    echo
 }
 
 # 主函数
@@ -373,17 +459,23 @@ main() {
     
     echo
     log_info "将自动执行以下操作:"
-    echo "  • 修复Debian软件源配置"
+    if [[ "$ID" == "debian" ]]; then
+        echo "  • 修复Debian软件源配置"
+    fi
     echo "  • 系统软件包更新"
     echo "  • 必要组件安装"
     echo "  • Docker安装"
-    echo "  • Docker Compose安装"
+    echo "  • Docker Compose检查"
     echo "  • 时区设置为Asia/Shanghai"
     echo "  • 彩色命令行配置"
     echo
     
-    fix_debian_sources
-    echo
+    # 只有Debian系统才修复源
+    if [[ "$ID" == "debian" ]]; then
+        fix_debian_sources
+        echo
+    fi
+    
     update_system
     echo
     install_packages
@@ -395,6 +487,8 @@ main() {
     set_timezone
     echo
     setup_colorful_terminal
+    echo
+    test_docker
     echo
     show_completion
 }
