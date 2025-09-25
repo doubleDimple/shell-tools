@@ -37,7 +37,7 @@ chmod +x upgrade_and_init.sh && \
 EOF
 ```
 
-## ⚡ setUp-eth.sh - 以太坊配置脚本
+## ⚡ setUp-eth.sh
 
 **下载脚本**
 ```bash
