@@ -39,6 +39,20 @@ SYMLINK_PATH="/usr/local/bin/oci-start"
 # JVM参数
 JVM_OPTS="-XX:+UseG1GC"
 
+# 检测是否为国内IP
+is_china_network() {
+    log_info "正在检测网络环境..."
+    
+    # 尝试连接Google，超时设置为5秒
+    if curl -s --connect-timeout 5 --max-time 5 https://google.com > /dev/null 2>&1; then
+        log_info "检测到可访问Google，判断为国外网络环境"
+        return 1  # 国外网络
+    else
+        log_info "检测到无法访问Google，判断为国内网络环境"
+        return 0  # 国内网络
+    fi
+}
+
 # 检查Java是否已安装
 check_java() {
     if ! command -v java &> /dev/null; then
@@ -402,7 +416,6 @@ update_latest() {
     
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
-    local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
     
     # 检查是否安装了curl
     if ! command -v curl &> /dev/null; then
@@ -420,6 +433,9 @@ update_latest() {
         fi
     fi
     
+    # 使用原始的GitHub API获取版本信息
+    local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+    
     # 获取版本信息
     log_info "获取最新版本信息..."
     local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
@@ -427,6 +443,12 @@ update_latest() {
     if [ -z "$download_url" ]; then
         log_error "无法获取最新版本信息，请检查网络连接"
         return 1
+    fi
+    
+    # 如果是国内网络，在下载链接前加上加速前缀
+    if is_china_network; then
+        download_url="https://speed.objboy.com/$download_url"
+        log_info "使用国内加速下载地址"
     fi
 
     local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep '"tag_name":' | cut -d '"' -f 4)
@@ -514,6 +536,7 @@ update_latest() {
         return 1
     fi
 }
+
 
 uninstall() {
     # 切换到脚本所在目录
