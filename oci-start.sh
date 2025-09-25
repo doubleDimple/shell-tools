@@ -39,6 +39,39 @@ SYMLINK_PATH="/usr/local/bin/oci-start"
 # JVM参数
 JVM_OPTS="-XX:+UseG1GC"
 
+# 检测是否为国内IP
+is_china_ip() {
+    log_info "正在检测服务器地理位置..."
+    
+    # 获取公网IP
+    local public_ip=""
+    
+    # 尝试多个服务获取公网IP
+    for service in "https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ipinfo.io/ip" "https://checkip.amazonaws.com"; do
+        public_ip=$(curl -s --connect-timeout 5 --max-time 10 "$service" 2>/dev/null | tr -d '\n\r' | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$')
+        if [ -n "$public_ip" ]; then
+            log_info "获取到公网IP: $public_ip"
+            break
+        fi
+    done
+    
+    if [ -z "$public_ip" ]; then
+        log_warn "无法获取公网IP，将使用默认下载地址"
+        return 1
+    fi
+    
+    # 使用ip-api.com检测IP归属地
+    local country_code=$(curl -s --connect-timeout 5 --max-time 10 "http://ip-api.com/line/$public_ip?fields=countryCode" 2>/dev/null)
+    
+    if [ "$country_code" = "CN" ]; then
+        log_info "检测到国内服务器，将使用加速下载地址"
+        return 0
+    else
+        log_info "检测到国外服务器 ($country_code)，使用默认下载地址"
+        return 1
+    fi
+}
+
 # 检查Java是否已安装
 check_java() {
     if ! command -v java &> /dev/null; then
@@ -402,7 +435,15 @@ update_latest() {
     
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
-    local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+    # 根据IP地理位置选择API地址
+    local api_url
+    if is_china_ip; then
+        api_url="https://speed.objboy.com/https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+        log_info "使用国内加速API地址"
+    else
+        api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+        log_info "使用默认API地址"
+    fi
     
     # 检查是否安装了curl
     if ! command -v curl &> /dev/null; then
