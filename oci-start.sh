@@ -436,16 +436,6 @@ update_latest() {
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
     
-    # 根据IP地理位置选择API地址
-    local api_url
-    if is_china_ip; then
-        api_url="https://speed.objboy.com/https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
-        log_info "使用国内加速API地址"
-    else
-        api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
-        log_info "使用默认API地址"
-    fi
-    
     # 检查是否安装了curl
     if ! command -v curl &> /dev/null; then
         log_info "安装curl..."
@@ -462,31 +452,109 @@ update_latest() {
         fi
     fi
     
-    # 获取版本信息
+    # 根据IP地理位置选择API地址
+    local api_url
+    local use_proxy=false
+    if is_china_ip; then
+        api_url="https://speed.objboy.com/https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+        use_proxy=true
+        log_info "使用国内加速API地址"
+    else
+        api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+        log_info "使用默认API地址"
+    fi
+    
+    # 获取版本信息 - 增加详细的调试信息
     log_info "获取最新版本信息..."
-    local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
-
-    if [ -z "$download_url" ]; then
-        log_error "无法获取最新版本信息，请检查网络连接"
+    log_info "API地址: $api_url"
+    
+    # 先测试API连接
+    log_info "测试API连接..."
+    local api_response=$(curl -s --connect-timeout 10 --max-time 30 -w "HTTP_CODE:%{http_code}" "$api_url" 2>&1)
+    local http_code=$(echo "$api_response" | grep "HTTP_CODE:" | cut -d: -f2)
+    
+    if [ -z "$http_code" ]; then
+        log_error "无法连接到API，curl错误信息:"
+        echo "$api_response"
+        
+        # 如果使用了代理，尝试直连
+        if [ "$use_proxy" = true ]; then
+            log_warn "代理访问失败，尝试直连GitHub API..."
+            api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+            api_response=$(curl -s --connect-timeout 10 --max-time 30 -w "HTTP_CODE:%{http_code}" "$api_url" 2>&1)
+            http_code=$(echo "$api_response" | grep "HTTP_CODE:" | cut -d: -f2)
+            use_proxy=false
+        fi
+        
+        if [ -z "$http_code" ]; then
+            log_error "无法获取最新版本信息，请检查网络连接"
+            return 1
+        fi
+    fi
+    
+    log_info "API响应状态码: $http_code"
+    
+    if [ "$http_code" != "200" ]; then
+        log_error "API返回错误状态码: $http_code"
+        if [ "$http_code" = "403" ]; then
+            log_error "GitHub API访问受限，请稍后重试"
+        elif [ "$http_code" = "404" ]; then
+            log_error "仓库不存在或无法访问"
+        fi
         return 1
     fi
     
-    # 如果是国内IP且下载链接是GitHub，则添加加速前缀
-    if is_china_ip && echo "$download_url" | grep -q "github.com"; then
+    # 解析API响应
+    local json_response=$(echo "$api_response" | sed 's/HTTP_CODE:[0-9]*$//')
+    
+    # 获取下载URL
+    local download_url=$(echo "$json_response" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
+    local latest_version=$(echo "$json_response" | grep '"tag_name":' | cut -d '"' -f 4)
+    
+    if [ -z "$download_url" ]; then
+        log_error "无法解析下载URL"
+        log_info "API响应内容:"
+        echo "$json_response" | head -20
+        return 1
+    fi
+    
+    if [ -z "$latest_version" ]; then
+        log_warn "无法获取版本号，使用默认版本标识"
+        latest_version="unknown"
+    fi
+    
+    # 处理下载URL - 如果是国内且需要加速
+    if [ "$use_proxy" = true ] && echo "$download_url" | grep -q "github.com"; then
         download_url="https://speed.objboy.com/$download_url"
         log_info "使用国内加速下载地址"
     fi
-
-    local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep '"tag_name":' | cut -d '"' -f 4)
+    
     log_info "找到最新版本: ${latest_version}"
+    log_info "下载地址: $download_url"
     log_info "开始下载..."
 
     local temp_file="${JAR_PATH}.temp"
     local backup_file="${JAR_PATH}.${latest_version}.bak"
 
-    # 下载文件
+    # 下载文件 - 增加进度显示和错误处理
     log_info "下载文件到: $temp_file"
-    if curl -L --connect-timeout 30 --max-time 300 -o "$temp_file" "$download_url"; then
+    
+    # 先测试下载连接
+    if ! curl -L --connect-timeout 10 --max-time 10 --head "$download_url" &>/dev/null; then
+        log_error "无法连接到下载地址"
+        
+        # 如果使用了代理下载，尝试直连下载
+        if echo "$download_url" | grep -q "speed.objboy.com"; then
+            log_warn "代理下载失败，尝试直连下载..."
+            download_url=$(echo "$download_url" | sed 's|https://speed.objboy.com/||')
+            log_info "新下载地址: $download_url"
+        else
+            return 1
+        fi
+    fi
+    
+    # 执行下载
+    if curl -L --connect-timeout 30 --max-time 300 --progress-bar -o "$temp_file" "$download_url"; then
         # 验证下载的文件
         if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
             log_error "下载的文件无效"
@@ -494,9 +562,14 @@ update_latest() {
             return 1
         fi
         
+        local file_size=$(stat -c%s "$temp_file" 2>/dev/null || echo "未知")
+        log_info "下载完成，文件大小: ${file_size} 字节"
+        
         # 检查文件类型（如果有file命令）
         if command -v file &> /dev/null; then
-            if ! file "$temp_file" | grep -q "Java archive\|Zip archive"; then
+            local file_type=$(file "$temp_file")
+            log_info "文件类型: $file_type"
+            if ! echo "$file_type" | grep -q "Java archive\|Zip archive"; then
                 log_error "下载的文件不是有效的JAR文件"
                 rm -f "$temp_file"
                 return 1
@@ -562,7 +635,6 @@ update_latest() {
         return 1
     fi
 }
-
 uninstall() {
     # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
