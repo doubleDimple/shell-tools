@@ -435,6 +435,7 @@ update_latest() {
     
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
+    
     # 根据IP地理位置选择API地址
     local api_url
     if is_china_ip; then
@@ -468,6 +469,12 @@ update_latest() {
     if [ -z "$download_url" ]; then
         log_error "无法获取最新版本信息，请检查网络连接"
         return 1
+    fi
+    
+    # 如果是国内IP且下载链接是GitHub，则添加加速前缀
+    if is_china_ip && echo "$download_url" | grep -q "github.com"; then
+        download_url="https://speed.objboy.com/$download_url"
+        log_info "使用国内加速下载地址"
     fi
 
     local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep '"tag_name":' | cut -d '"' -f 4)
