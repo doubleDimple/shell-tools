@@ -1,25 +1,19 @@
 # 🐧 Linux 初始化脚本
-
 > 一键式 Linux 系统初始化和配置脚本
 
 ## 📦 init.sh - 系统初始化脚本
-
 ### 使用方法
-
 **第一步：下载脚本**
 ```bash
 wget -O init.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/init.sh && chmod +x init.sh
 ```
-
 **第二步：运行脚本**
 ```bash
 ./init.sh
 ```
 
 ## 🚨 Debian 10 应急安装
-
 > 适用于新系统无法安装任何命令的情况
-
 ```bash
 bash << 'EOF'
 export DEBIAN_FRONTEND=noninteractive
@@ -38,13 +32,24 @@ EOF
 ```
 
 ## ⚡ setUp-eth.sh
-
 **下载脚本**
 ```bash
 wget -O setUp-eth.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/setUp-eth.sh && chmod +x setUp-eth.sh
 ```
-
 **运行脚本**
 ```bash
 ./setUp-eth.sh
+```
+
+## 🚀 smart-exec.sh - 加速下载脚本
+> 智能加速脚本，优化下载速度和执行效率
+
+**下载脚本**
+```bash
+wget -O smart-exec.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/smart/smart-exec.sh && chmod +x smart-exec.sh
+```
+
+**运行脚本**
+```bash
+./smart-exec.sh
 ```
