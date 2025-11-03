@@ -19,14 +19,8 @@ bash << 'EOF'
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
-
-# 1️⃣ 安装 cloud-guest-utils 以确保有 resize2fs
 apt install -y cloud-guest-utils || true
-
-# 2️⃣ 扩容根分区（先扩再升级）
 resize2fs /dev/sda2 || true
-
-# 3️⃣ 再执行升级和初始化
 apt upgrade -y && apt full-upgrade -y && apt --purge autoremove -y && \
 echo 'deb http://deb.debian.org/debian bullseye main contrib non-free
 deb http://security.debian.org/debian-security bullseye-security main contrib non-free
