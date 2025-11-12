@@ -20,8 +20,8 @@
 
 ```bash
 下载脚本
-wget -O install-master.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/k8s/install-master.sh && chmod +x install-master.sh
-./install-master.sh
+wget -O install-rancher.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/k8s/install-rancher.sh && chmod +x install-rancher.sh
+./install-rancher.sh
 ```
 
 ### 2️⃣ 保存 Join 命令
