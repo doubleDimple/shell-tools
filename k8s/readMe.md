@@ -1,3 +1,5 @@
+# 0. 下载
+wget -O k8s-install.sh https://raw.githubusercontent.com/doubleDimple/shell-tools/master/k8s/k8s-install.sh && chmod +x k8s-install.sh.sh
 # 1. master 安装 K8s（带 flannel）
 bash k8s-install.sh --flannel -v 1.30.0
 
