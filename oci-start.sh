@@ -1,15 +1,24 @@
 #!/bin/bash
+#
+# 作者: doubleDimple
+# 描述: OCI-Start 应用的启动/停止/管理脚本，支持自定义端口和公网IP显示。
+# 用法: ./oci-start.sh {start|stop|restart|status|update|uninstall} [-p <port>]
+# 示例:
+#   启动到默认端口 9856: ./oci-start.sh start
+#   启动到自定义端口 30998: ./oci-start.sh start -p 30998
+#   重启到新端口 8080: ./oci-start.sh restart -p 8080
 
-# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 日志函数
+DEFAULT_PORT=9856
+CUSTOM_PORT=$DEFAULT_PORT # 初始值是默认值
+
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -26,34 +35,29 @@ log_success() {
     echo -e "${CYAN}[SUCCESS]${NC} $1"
 }
 
-# 获取脚本的实际路径(无论从哪里调用)
 SCRIPT_REAL_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 
-# 应用配置 - 使用绝对路径
 JAR_PATH="/root/oci-start/oci-start-release.jar"
 LOG_FILE="/dev/null"
 JAR_DIR="$(dirname "$JAR_PATH")"
 SCRIPT_PATH=$(readlink -f "$0")
 SYMLINK_PATH="/usr/local/bin/oci-start"
 
-# JVM参数
 JVM_OPTS="-XX:+UseG1GC"
 
-# 检测是否为国内IP
+
 is_china_network() {
     log_info "正在检测网络环境..."
     
-    # 尝试连接Google，超时设置为5秒
     if curl -s --connect-timeout 5 --max-time 5 https://google.com > /dev/null 2>&1; then
         log_info "检测到可访问Google，判断为国外网络环境"
-        return 1  # 国外网络
+        return 1
     else
         log_info "检测到无法访问Google，判断为国内网络环境"
-        return 0  # 国内网络
+        return 0
     fi
 }
 
-# 检查Java是否已安装
 check_java() {
     if ! command -v java &> /dev/null; then
         log_warn "未检测到Java，准备安装JDK..."
@@ -64,21 +68,17 @@ check_java() {
     fi
 }
 
-# 安装Java
 install_java() {
     log_info "开始安装Java..."
     if command -v apt &> /dev/null; then
-        # Debian/Ubuntu
         log_info "使用apt安装JDK..."
         apt update -y
         DEBIAN_FRONTEND=noninteractive apt install -y default-jdk
     elif command -v yum &> /dev/null; then
-        # CentOS/RHEL
         log_info "使用yum安装JDK..."
         yum update -y
         yum install -y java-11-openjdk
     elif command -v dnf &> /dev/null; then
-        # Fedora
         log_info "使用dnf安装JDK..."
         dnf update -y
         dnf install -y java-11-openjdk
@@ -96,7 +96,6 @@ install_java() {
     fi
 }
 
-# 检查Websockify是否已安装
 check_websockify() {
     if ! command -v websockify &> /dev/null; then
         log_warn "未检测到Websockify，准备安装..."
@@ -106,23 +105,18 @@ check_websockify() {
     fi
 }
 
-# 安装Websockify
 install_websockify() {
     log_info "开始安装Websockify..."
     
-    # 首先检查Python是否已安装
     if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
         log_info "Python未安装，正在安装Python..."
         if command -v apt &> /dev/null; then
-            # Debian/Ubuntu
             apt update -y
             DEBIAN_FRONTEND=noninteractive apt install -y python3 python3-pip
         elif command -v yum &> /dev/null; then
-            # CentOS/RHEL
             yum update -y
             yum install -y python3 python3-pip
         elif command -v dnf &> /dev/null; then
-            # Fedora
             dnf update -y
             dnf install -y python3 python3-pip
         else
@@ -131,7 +125,6 @@ install_websockify() {
         fi
     fi
     
-    # 确定使用的Python命令
     PYTHON_CMD=""
     if command -v python3 &> /dev/null; then
         PYTHON_CMD="python3"
@@ -142,7 +135,6 @@ install_websockify() {
         exit 1
     fi
     
-    # 检查pip是否可用
     PIP_CMD=""
     if command -v pip3 &> /dev/null; then
         PIP_CMD="pip3"
@@ -167,10 +159,8 @@ install_websockify() {
         fi
     fi
     
-    # 尝试通过包管理器安装websockify
     local installed_via_package=false
     if command -v apt &> /dev/null; then
-        # Debian/Ubuntu - 尝试通过apt安装
         log_info "尝试通过apt安装websockify..."
         if apt install -y websockify 2>/dev/null; then
             installed_via_package=true
@@ -179,7 +169,6 @@ install_websockify() {
             log_warn "apt安装websockify失败，将使用pip安装"
         fi
     elif command -v yum &> /dev/null; then
-        # CentOS/RHEL - 通常需要EPEL源
         log_info "尝试通过yum安装websockify..."
         if yum install -y python3-websockify 2>/dev/null || yum install -y websockify 2>/dev/null; then
             installed_via_package=true
@@ -188,7 +177,6 @@ install_websockify() {
             log_warn "yum安装websockify失败，将使用pip安装"
         fi
     elif command -v dnf &> /dev/null; then
-        # Fedora
         log_info "尝试通过dnf安装websockify..."
         if dnf install -y python3-websockify 2>/dev/null; then
             installed_via_package=true
@@ -198,7 +186,6 @@ install_websockify() {
         fi
     fi
     
-    # 如果包管理器安装失败，使用pip安装
     if [ "$installed_via_package" = false ]; then
         log_info "使用pip安装websockify..."
         if $PIP_CMD install websockify; then
@@ -215,7 +202,6 @@ install_websockify() {
         fi
     fi
     
-    # 验证安装
     if ! command -v websockify &> /dev/null; then
         log_error "websockify安装失败，命令不可用"
         exit 1
@@ -225,13 +211,10 @@ install_websockify() {
     fi
 }
 
-# 创建软链接
 create_symlink() {
     if [ ! -L "$SYMLINK_PATH" ] || [ "$(readlink "$SYMLINK_PATH")" != "$SCRIPT_PATH" ]; then
         log_info "创建软链接: $SYMLINK_PATH -> $SCRIPT_PATH"
-        # 确保目标目录存在
         mkdir -p "$(dirname "$SYMLINK_PATH")" 2>/dev/null
-        # 尝试创建软链接，如果没有权限则提示使用sudo
         if ln -sf "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
             log_success "软链接创建成功，现在可以使用 'oci-start' 命令"
         else
@@ -246,9 +229,7 @@ create_symlink() {
     fi
 }
 
-# 检查并下载jar包
 check_and_download_jar() {
-    # 始终使用绝对路径操作
     if [ ! -f "$JAR_PATH" ]; then
         log_info "未找到JAR包，准备下载最新版本..."
         mkdir -p "$(dirname "$JAR_PATH")"
@@ -260,26 +241,40 @@ check_and_download_jar() {
     fi
 }
 
+get_public_ip() {
+    log_info "正在尝试获取公网IP..."
+    
+    local ip=$(curl -s --connect-timeout 5 --max-time 10 https://api.ipify.org || \
+               curl -s --connect-timeout 5 --max-time 10 http://ifconfig.me/ip || \
+               curl -s --connect-timeout 5 --max-time 10 http://ip.sb)
+    
+    if echo "$ip" | grep -E -q '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+        log_success "成功获取公网IP: $ip"
+        echo "$ip"
+    else
+        log_warn "无法获取公网IP，将使用内网IP"
+        local internal_ip=$(hostname -I | awk '{print $1}')
+        if [ -z "$internal_ip" ]; then
+            internal_ip=$(ip route get 1 | awk '{print $(NF-2);exit}')
+        fi
+        echo "$internal_ip"
+    fi
+}
+
 start() {
-    # 切换到脚本所在目录，确保所有操作基于此目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
     
-    # 检查Java安装，自动安装JDK
     check_java
     
-    # 检查Websockify安装，自动安装Websockify
     check_websockify
     
-    # 检查并下载jar包
     check_and_download_jar
     
-    # 创建软链接
     create_symlink
     
-    # 输出成功提示
     log_success "环境准备完成，现在可以使用 'oci-start' 命令"
 
     if pgrep -f "$JAR_PATH" > /dev/null; then
@@ -287,25 +282,19 @@ start() {
         exit 0
     fi
 
-    log_info "正在启动应用..."
+    log_info "正在启动应用 (端口: $CUSTOM_PORT)..."
 
-    # 启动应用 - 使用绝对路径
-    nohup java $JVM_OPTS -jar "$JAR_PATH" > "$LOG_FILE" 2>&1 &
+    # 使用当前的 $CUSTOM_PORT 启动应用
+    nohup java $JVM_OPTS -Dserver.port="$CUSTOM_PORT" -jar "$JAR_PATH" > "$LOG_FILE" 2>&1 &
 
-    # 等待几秒检查是否成功启动
     sleep 3
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_success "应用启动成功"
 
-        # 获取系统IP地址
-        IP=$(hostname -I | awk '{print $1}')
-        if [ -z "$IP" ]; then
-            IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
-        fi
+        IP=$(get_public_ip)
 
-        # 输出访问地址
         echo -e "${BLUE}欢迎使用oci-start${NC}"
-        echo -e "${CYAN}访问地址为: ${NC}http://${IP}:9856"
+        echo -e "${CYAN}访问地址为: ${NC}http://${IP}:${CUSTOM_PORT}"
 
     else
         log_error "应用启动失败"
@@ -313,15 +302,12 @@ start() {
     fi
 }
 
-# 改进的停止函数 - 保持简洁但增加超时检查
 stop() {
-    # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
     
-    # 创建软链接，确保停止后仍然可以使用oci-start命令
     create_symlink
     
     PIDS=$(pgrep -f "$JAR_PATH")
@@ -330,12 +316,10 @@ stop() {
         return 0
     fi
 
-    log_info "正在停止应用... (PIDs: $PIDS)"
+    log_info "正在停止应用... (PIDS: $PIDS)"
     
-    # 发送TERM信号
     kill $PIDS 2>/dev/null
     
-    # 等待进程停止，最多等待10秒
     local count=0
     while [ $count -lt 10 ]; do
         if ! pgrep -f "$JAR_PATH" > /dev/null; then
@@ -347,7 +331,6 @@ stop() {
         log_info "等待进程停止... ($count/10)"
     done
     
-    # 如果还没停止，强制停止
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_warn "强制停止应用..."
         kill -9 $(pgrep -f "$JAR_PATH") 2>/dev/null
@@ -367,28 +350,47 @@ stop() {
 }
 
 restart() {
-    # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
+
+    # --- 新增逻辑：自动继承旧端口 ---
+    if pgrep -f "$JAR_PATH" > /dev/null; then
+        # 1. 获取当前运行的进程PID (取第一个)
+        local pid=$(pgrep -f "$JAR_PATH" | head -n 1)
+        
+        # 2. 从进程启动命令中提取 server.port 的值
+        # ps -p <pid> -o args= 会输出完整的启动命令
+        local running_port=$(ps -p "$pid" -o args= | grep -o 'server\.port=[0-9]*' | cut -d '=' -f 2)
+
+        # 3. 判断：如果获取到了旧端口，且用户本次没有通过 -p 指定新端口(即 CUSTOM_PORT 仍为默认值)
+        # 那么就强制将端口变量修改为旧端口
+        if [ -n "$running_port" ]; then
+            if [ "$CUSTOM_PORT" -eq "$DEFAULT_PORT" ]; then
+                log_info "检测到上次运行端口为: $running_port，将继承该端口进行重启..."
+                CUSTOM_PORT=$running_port
+            else
+                log_info "检测到上次运行端口为: $running_port，但用户指定了新端口: $CUSTOM_PORT，将使用新端口。"
+            fi
+        fi
+    fi
+    # --- 新增逻辑结束 ---
     
-    # 重启时也检查环境
     check_java
     check_websockify
     create_symlink
+    
     stop
     start
 }
 
 status() {
-    # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
     
-    # 在所有命令中都增加环境检查
     check_java
     check_websockify
     create_symlink
@@ -400,24 +402,29 @@ status() {
     fi
 }
 
-# 改进的更新函数 - 基于原有逻辑但增加错误处理
 update_latest() {
-    # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
     
-    # 检查Java安装
     check_java
-    
-    # 检查Websockify安装
     check_websockify
+
+    # === 新增逻辑开始：在停止服务前，先记录当前端口 ===
+    local PREVIOUS_PORT=""
+    if pgrep -f "$JAR_PATH" > /dev/null; then
+        local pid=$(pgrep -f "$JAR_PATH" | head -n 1)
+        PREVIOUS_PORT=$(ps -p "$pid" -o args= | grep -o 'server\.port=[0-9]*' | cut -d '=' -f 2)
+        if [ -n "$PREVIOUS_PORT" ]; then
+            log_info "检测到当前运行端口为: $PREVIOUS_PORT，更新后将维持该端口。"
+        fi
+    fi
+    # === 新增逻辑结束 ===
     
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
     
-    # 检查是否安装了curl
     if ! command -v curl &> /dev/null; then
         log_info "安装curl..."
         if command -v apt &> /dev/null; then
@@ -433,10 +440,8 @@ update_latest() {
         fi
     fi
     
-    # 使用原始的GitHub API获取版本信息
     local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
     
-    # 获取版本信息
     log_info "获取最新版本信息..."
     local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
 
@@ -445,7 +450,6 @@ update_latest() {
         return 1
     fi
     
-    # 如果是国内网络，在下载链接前加上加速前缀
     if is_china_network; then
         download_url="https://speed.objboy.com/$download_url"
         log_info "使用国内加速下载地址"
@@ -458,17 +462,14 @@ update_latest() {
     local temp_file="${JAR_PATH}.temp"
     local backup_file="${JAR_PATH}.${latest_version}.bak"
 
-    # 下载文件
     log_info "下载文件到: $temp_file"
     if curl -L --connect-timeout 30 --max-time 300 -o "$temp_file" "$download_url"; then
-        # 验证下载的文件
         if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
             log_error "下载的文件无效"
             rm -f "$temp_file"
             return 1
         fi
         
-        # 检查文件类型（如果有file命令）
         if command -v file &> /dev/null; then
             if ! file "$temp_file" | grep -q "Java archive\|Zip archive"; then
                 log_error "下载的文件不是有效的JAR文件"
@@ -479,7 +480,6 @@ update_latest() {
         
         log_success "文件下载完成"
         
-        # 停止应用
         log_info "停止当前应用..."
         if ! stop; then
             log_error "停止应用失败"
@@ -487,7 +487,6 @@ update_latest() {
             return 1
         fi
         
-        # 备份原文件
         if [ -f "$JAR_PATH" ]; then
             if cp "$JAR_PATH" "$backup_file"; then
                 log_info "原JAR包已备份为: $backup_file"
@@ -498,15 +497,19 @@ update_latest() {
             fi
         fi
 
-        # 替换文件
         if mv "$temp_file" "$JAR_PATH"; then
             chmod +x "$JAR_PATH"
             log_success "JAR包更新完成，版本：${latest_version}"
             
-            # 启动应用
             log_info "启动新版本..."
+            
+            # === 新增逻辑开始：恢复之前的端口 ===
+            if [ -n "$PREVIOUS_PORT" ]; then
+                CUSTOM_PORT=$PREVIOUS_PORT
+            fi
+            # === 新增逻辑结束 ===
+            
             if start; then
-                # 验证启动
                 sleep 5
                 if pgrep -f "$JAR_PATH" > /dev/null; then
                     log_success "新版本启动成功，清理备份文件..."
@@ -539,7 +542,6 @@ update_latest() {
 
 
 uninstall() {
-    # 切换到脚本所在目录
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
@@ -563,26 +565,21 @@ uninstall() {
 
     log_info "开始卸载应用..."
 
-    # 停止应用
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_info "正在停止应用进程..."
         stop
         sleep 2
     fi
 
-    # 删除应用文件
     [ -f "$JAR_PATH" ] && rm -f "$JAR_PATH"
-
-    # 清理其他文件
+    
     find "$JAR_DIR" -name "*.bak" -o -name "*.backup" -o -name "*.temp" -o -name "*.log" -delete 2>/dev/null
 
-    # 删除软链接
     if [ -L "$SYMLINK_PATH" ]; then
         log_info "正在删除软链接..."
         rm -f "$SYMLINK_PATH"
     fi
 
-    # 检查是否清理完成
     if [ ! -f "$JAR_PATH" ] && [ ! -L "$SYMLINK_PATH" ]; then
         log_success "应用卸载完成"
         echo -e "${GREEN}如需重新安装应用，请使用 'start' 命令${NC}"
@@ -592,8 +589,49 @@ uninstall() {
     fi
 }
 
-# 主命令处理
-case "$1" in
+parse_args() {
+    # 只处理 $1 开始的参数列表
+    local args=("$@") # 将所有参数复制到局部数组
+    
+    for (( i=0; i<${#args[@]}; i++ )); do
+        arg="${args[i]}"
+        next_arg="${args[i+1]}"
+        
+        if [[ "$arg" == "-p" || "$arg" == "--port" ]]; then
+            # 检查 $2 是否存在
+            if [ -z "$next_arg" ]; then
+                log_error "缺少端口号参数，请使用 -p <端口号> 指定。"
+                exit 1
+            fi
+            
+            # 检查 $2 是否为数字 (POSIX兼容)
+            if ! [ "$next_arg" -eq "$next_arg" ] 2>/dev/null; then
+                log_error "端口参数无效: $next_arg。端口号必须是数字。"
+                exit 1
+            fi
+            
+            # 检查范围
+            if [ "$next_arg" -ge 1 ] && [ "$next_arg" -le 65535 ]; then
+                CUSTOM_PORT="$next_arg"
+                return 0 # 找到端口并设置，直接退出函数
+            else
+                log_error "端口参数无效: $next_arg。请提供一个1到65535之间的数字。"
+                exit 1
+            fi
+        fi
+    done
+    return 0
+}
+
+COMMAND=$1
+
+# 步骤 1: 解析命令行参数。如果提供了 -p，会覆盖默认端口。
+if [ "$COMMAND" = "start" ] || [ "$COMMAND" = "restart" ]; then
+    # 只解析命令之后的参数 (shift 一次)
+    parse_args "${@:2}"
+fi
+
+case "$COMMAND" in
     start)
         start
         ;;
@@ -613,7 +651,8 @@ case "$1" in
         uninstall
         ;;
     *)
-        echo -e "${YELLOW}Usage: $0 {start|stop|restart|status|update|uninstall}${NC}"
+        echo -e "${YELLOW}Usage: $0 {start|stop|restart|status|update|uninstall} [-p <port>]${NC}"
+        echo -e "${YELLOW}Example: $0 start -p 30998${NC}"
         exit 1
         ;;
 esac
