@@ -1,163 +1,205 @@
-#!/usr/bin/env bash
-# =========================================================
-#  K8s 国内阿里云 ONLY 一键安装脚本
-#  - Ubuntu / Debian
-#  - containerd + kubeadm
-#  - 所有镜像强制走 registry.aliyuncs.com
-# =========================================================
+#!/bin/bash
+# Modified for China VPS - Base on Jrohy/k8s-install
 
-set -euo pipefail
+####### color code ########
+red="31m"
+green="32m"
+yellow="33m"
+blue="36m"
+fuchsia="35m"
 
-### 配置 ###
-ALIYUN_REPO="registry.aliyuncs.com/google_containers"
-POD_CIDR_FLANNEL="10.244.0.0/16"
-POD_CIDR_CALICO="192.168.0.0/16"
+# 是否是 master 节点
+is_master=0
+# flannel / calico
+network=""
+# 默认版本
+KUBERNETES_MINOR="v1.31"
 
-### 变量 ###
-HOSTNAME_ARG=""
-IS_MASTER=0
-NETWORK=""
-K8S_MINOR="v1.34"
-
-### 颜色 ###
-red="\033[31m"; green="\033[32m"; yellow="\033[33m"; blue="\033[36m"; end="\033[0m"
-
-log(){ echo -e "${green}[INFO]${end} $*"; }
-warn(){ echo -e "${yellow}[WARN]${end} $*"; }
-err(){ echo -e "${red}[ERROR]${end} $*"; exit 1; }
-
-usage(){
-cat <<EOF
-Usage:
-  Master:
-    bash $0 --hostname k8s-master-1 --flannel -v 1.34.3
-  Worker:
-    bash $0 --hostname k8s-worker-1 -v 1.34.3
-Options:
-  --hostname <name>
-  --flannel | --calico
-  -v | --version <x.y.z>
-EOF
+color_echo(){
+    echo -e "\033[$1${*:2}\033[0m"
 }
 
-### 参数解析 ###
+run_command(){
+    echo ""
+    local command=$1
+    echo -e "\033[32m$command\033[0m"
+    eval "$command"
+}
+
+set_hostname(){
+    local hostname=$1
+    if [[ $hostname =~ '_' ]];then
+        color_echo $yellow "hostname 不能包含 '_'，自动替换为 '-' ..."
+        hostname=$(echo "$hostname" | sed 's/_/-/g')
+    fi
+    echo "set hostname: $(color_echo $blue $hostname)"
+    grep -q "127.0.0.1 $hostname" /etc/hosts || echo "127.0.0.1 $hostname" >> /etc/hosts
+    run_command "hostnamectl --static set-hostname $hostname"
+}
+
+####### get params #########
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --hostname) HOSTNAME_ARG="$2"; shift ;;
-    --flannel) NETWORK="flannel"; IS_MASTER=1 ;;
-    --calico)  NETWORK="calico";  IS_MASTER=1 ;;
-    -v|--version)
-      if [[ "$2" =~ ^([0-9]+)\.([0-9]+) ]]; then
-        K8S_MINOR="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-      fi
-      shift ;;
-    -h|--help) usage; exit 0 ;;
-  esac
-  shift
+    case "$1" in
+        --hostname)
+            set_hostname "$2"
+            shift
+            ;;
+        -v|--version)
+            k8s_version="${2#v}"
+            if [[ "$k8s_version" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+                KUBERNETES_MINOR="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            fi
+            shift
+            ;;
+        --flannel)
+            echo "使用 Flannel 网络，设为 Master 节点"
+            network="flannel"
+            is_master=1
+            ;;
+        --calico)
+            echo "使用 Calico 网络，设为 Master 节点"
+            network="calico"
+            is_master=1
+            ;;
+        -h|--help)
+            echo "使用说明:"
+            echo "  --flannel              安装为 Master 并使用 Flannel"
+            echo "  --calico               安装为 Master 并使用 Calico"
+            echo "  --hostname [name]      设置主机名"
+            echo "  -v, --version [ver]    指定版本 (默认 v1.31)"
+            exit 0
+            ;;
+    esac
+    shift
 done
 
-### 前置检查 ###
-[[ "$(id -u)" == "0" ]] || err "必须 root 执行"
-grep -qiE 'ubuntu|debian' /etc/os-release || err "仅支持 Ubuntu / Debian"
+check_sys() {
+    if [[ $(id -u) != "0" ]]; then
+        color_echo ${red} "Error: 必须使用 root 执行"
+        exit 1
+    fi
 
-### hostname ###
-if [[ -n "$HOSTNAME_ARG" ]]; then
-  HOSTNAME_ARG="${HOSTNAME_ARG//_/-}"
-  hostnamectl set-hostname "$HOSTNAME_ARG"
-  grep -q "$HOSTNAME_ARG" /etc/hosts || echo "127.0.0.1 $HOSTNAME_ARG" >> /etc/hosts
-fi
+    if [[ "$(grep -c '^processor' /proc/cpuinfo)" == "1" && $is_master == 1 ]]; then
+        color_echo ${red} "Master 节点 CPU 必须 >= 2核"
+        exit 1
+    fi
 
-### 系统参数 ###
-log "关闭 swap / 开启转发"
-swapoff -a || true
-sed -i.bak '/ swap / s/^/#/' /etc/fstab
+    if [[ -e /etc/redhat-release ]]; then
+        os='CentOS'; package_manager='yum'
+    elif grep -qi "Ubuntu" /etc/os-release; then
+        os='Ubuntu'; package_manager='apt-get'
+    elif grep -qi "Debian" /etc/os-release; then
+        os='Debian'; package_manager='apt-get'
+    else
+        color_echo ${red} "仅支持 CentOS/Ubuntu/Debian"
+        exit 1
+    fi
+    echo "操作系统: $os, 仓库大版本: $KUBERNETES_MINOR"
+}
 
-cat >/etc/sysctl.d/k8s.conf <<EOF
-net.bridge.bridge-nf-call-iptables=1
-net.ipv4.ip_forward=1
+prepare_sys() {
+    color_echo $blue ">>> 正在优化系统内核参数及关闭 Swap..."
+    swapoff -a
+    sed -i '/swap/s/^/#/' /etc/fstab
+    
+    cat <<EOF > /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
 EOF
-modprobe br_netfilter || true
-sysctl --system
+    modprobe br_netfilter || true
+    sysctl --system
 
-### 安装依赖 ###
-log "安装基础依赖"
-apt-get update -y
-apt-get install -y curl ca-certificates gpg bash-completion apt-transport-https
+    if [[ $os == 'CentOS' ]]; then
+        setenforce 0 || true
+        sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+    fi
+}
 
-### 安装 containerd ###
-log "安装 containerd"
-apt-get install -y containerd
+install_containerd() {
+    color_echo $blue ">>> 正在安装 Containerd (国内源)..."
+    if [[ $package_manager == "apt-get" ]]; then
+        apt-get update && apt-get install -y containerd
+    else
+        yum install -y yum-utils
+        yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+        yum install -y containerd.io
+    fi
 
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
+    mkdir -p /etc/containerd
+    containerd config default | tee /etc/containerd/config.toml >/dev/null
+    
+    # 关键修改：国内 pause 镜像及 SystemdCgroup
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+    sed -i 's|registry.k8s.io/pause:3.6|registry.aliyuncs.com/google_containers/pause:3.10|g' /etc/containerd/config.toml
+    sed -i 's|registry.k8s.io/pause:3.8|registry.aliyuncs.com/google_containers/pause:3.10|g' /etc/containerd/config.toml
+    
+    systemctl restart containerd
+    systemctl enable containerd
+}
 
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-
-### ★★★ 关键：阿里 registry mirror ★★★
-log "配置 containerd 阿里云镜像（registry.mirrors）"
-
-cat >> /etc/containerd/config.toml <<EOF
-
-[plugins."io.containerd.grpc.v1.cri".registry]
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.k8s.io"]
-      endpoint = ["https://registry.aliyuncs.com"]
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-      endpoint = ["https://registry.aliyuncs.com"]
+install_k8s_base() {
+    color_echo $blue ">>> 正在安装 K8s 组件 (阿里云镜像源)..."
+    if [[ $package_manager == "apt-get" ]]; then
+        apt-get update && apt-get install -y apt-transport-https curl
+        curl -fsSL https://mirrors.aliyun.com/kubernetes-new/core/stable/${KUBERNETES_MINOR}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://mirrors.aliyun.com/kubernetes-new/core/stable/${KUBERNETES_MINOR}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+        apt-get update
+        apt-get install -y kubelet kubeadm kubectl
+    else
+        cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://mirrors.aliyun.com/kubernetes-new/core/stable/${KUBERNETES_MINOR}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/kubernetes-new/core/stable/${KUBERNETES_MINOR}/rpm/repodata/repomd.xml.key
 EOF
+        yum install -y kubelet kubeadm kubectl
+    fi
+    systemctl enable kubelet && systemctl start kubelet
+}
 
-systemctl daemon-reexec
-systemctl enable containerd
-systemctl restart containerd
+run_k8s() {
+    if [[ $is_master -eq 1 ]]; then
+        color_echo $green ">>> 正在初始化 Master 节点 (使用阿里云容器仓库)..."
+        # 指定国内镜像仓库地址
+        local init_cmd="kubeadm init --image-repository registry.aliyuncs.com/google_containers"
+        
+        if [[ $network == "flannel" ]]; then
+            eval "$init_cmd --pod-network-cidr=10.244.0.0/16"
+            mkdir -p $HOME/.kube
+            cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+            chown $(id -u):$(id -g) $HOME/.kube/config
+            # 国内环境下载 flannel 配置文件可能较慢，建议手动下载或尝试：
+            kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml || color_echo $yellow "Flannel YAML 下载失败，请手动 apply"
+        elif [[ $network == "calico" ]]; then
+            eval "$init_cmd --pod-network-cidr=192.168.0.0/16"
+            mkdir -p $HOME/.kube
+            cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+            chown $(id -u):$(id -g) $HOME/.kube/config
+            kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml || color_echo $yellow "Calico YAML 下载失败"
+        fi
+    else
+        color_echo $fuchsia "================================================="
+        color_echo $green "本节点环境已准备完毕！(Worker 模式)"
+        color_echo $green "请在 Master 节点执行: kubeadm token create --print-join-command"
+        color_echo $green "然后将得到的命令粘贴到此处执行即可。"
+        color_echo $fuchsia "================================================="
+    fi
+    
+    # 配置 crictl
+    if command -v crictl >/dev/null 2>&1; then
+        crictl config --set runtime-endpoint=unix:///run/containerd/containerd.sock
+    fi
+}
 
-### 测试阿里镜像 ###
-log "测试阿里镜像可达性"
-ctr -n k8s.io image pull ${ALIYUN_REPO}/pause:3.10 || err "阿里镜像不可达"
+main() {
+    check_sys
+    prepare_sys
+    install_containerd
+    install_k8s_base
+    run_k8s
+}
 
-### K8s 安装源（阿里云）###
-log "配置阿里云 kubernetes-new 源"
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://mirrors.aliyun.com/kubernetes-new/core/stable/${K8S_MINOR}/deb/Release.key \
- | gpg --dearmor -o /etc/apt/keyrings/kubernetes.gpg
-
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://mirrors.aliyun.com/kubernetes-new/core/stable/${K8S_MINOR}/deb/ /" \
- > /etc/apt/sources.list.d/kubernetes.list
-
-apt-get update -y
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
-
-### 预拉镜像（阿里）###
-log "预拉 K8s 镜像（阿里）"
-kubeadm config images pull --image-repository ${ALIYUN_REPO}
-
-### kubeadm init ###
-if [[ "$IS_MASTER" == "1" ]]; then
-  [[ -n "$NETWORK" ]] || err "Master 必须指定 --flannel 或 --calico"
-
-  POD_CIDR="$POD_CIDR_FLANNEL"
-  [[ "$NETWORK" == "calico" ]] && POD_CIDR="$POD_CIDR_CALICO"
-
-  log "初始化 Master（阿里镜像）"
-  kubeadm init \
-    --image-repository ${ALIYUN_REPO} \
-    --pod-network-cidr=${POD_CIDR}
-
-  mkdir -p $HOME/.kube
-  cp /etc/kubernetes/admin.conf $HOME/.kube/config
-  chown $(id -u):$(id -g) $HOME/.kube/config
-
-  if [[ "$NETWORK" == "flannel" ]]; then
-    kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
-  else
-    kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
-  fi
-
-  log "✅ Master 安装完成"
-  log "👉 Worker 加入命令："
-  kubeadm token create --print-join-command
-else
-  warn "Worker 模式：仅安装基础环境"
-fi
-
-log "🎉 完成（国内阿里云 ONLY）"
+main
