@@ -3,7 +3,7 @@
 # 夜莺(Nightingale)一体化部署脚本  —— 母鸡 / 节点 共用一个脚本
 #
 # 用法:
-#   master(中心服务端,装一次):
+#   母鸡(中心服务端,装一次):
 #     sudo ./n9e-deploy.sh master
 #     # 装完会自动打印「节点该执行的命令」,IP 已填好,复制到节点上跑即可
 #
@@ -13,6 +13,12 @@
 #
 #   不带参数运行会自动判断 / 交互询问角色:
 #     sudo ./n9e-deploy.sh
+#
+#   卸载(自动识别本机装的是母鸡还是节点):
+#     sudo ./n9e-deploy.sh uninstall            # 仅删程序与服务,保留数据
+#     sudo ./n9e-deploy.sh uninstall master     # 只卸母鸡
+#     sudo ./n9e-deploy.sh uninstall node       # 只卸节点
+#     PURGE_DATA=1 sudo ./n9e-deploy.sh uninstall   # 连数据目录一起删除
 #
 # 特点:母鸡端纯二进制(n9e 用 SQLite+内置 miniredis,VictoriaMetrics 存指标),
 #       无需 Docker / MySQL / Redis;节点端只装 Categraf 采集器。
@@ -58,8 +64,9 @@ detect_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
 ROLE="${1:-}"
 case "$ROLE" in
     master|node) shift ;;
+    uninstall)   shift; UNINST_TARGET="${1:-auto}" ;;
     "")          ROLE="" ;;
-    *)           error "未知角色 '$ROLE'。用法: $0 [master|node] [母鸡IP]"; exit 1 ;;
+    *)           error "未知角色 '$ROLE'。用法: $0 [master|node|uninstall] [参数]"; exit 1 ;;
 esac
 # node 模式:母鸡 IP 可由第 2 个参数提供
 if [ "$ROLE" = "node" ] && [ -n "${1:-}" ] && [ -z "$N9E_SERVER" ]; then
@@ -275,9 +282,77 @@ EOF
     fi
 }
 
+############################################################
+# 卸载
+############################################################
+do_uninstall() {
+    local target="${1:-auto}"
+    local kill_master=0 kill_node=0
+    local has_master=0 has_node=0
+    systemctl list-unit-files 2>/dev/null | grep -q '^n9e\.service'      && has_master=1
+    systemctl list-unit-files 2>/dev/null | grep -q '^categraf\.service' && has_node=1
+
+    case "$target" in
+        master) kill_master=1 ;;
+        node)   kill_node=1 ;;
+        all)    kill_master=1; kill_node=1 ;;
+        auto)
+            kill_master=$has_master; kill_node=$has_node
+            if [ "$kill_master" -eq 0 ] && [ "$kill_node" -eq 0 ]; then
+                warn "未检测到已安装的夜莺/采集器组件,无需卸载"; exit 0
+            fi ;;
+        *) error "未知卸载目标 '$target',可选: master | node | all"; exit 1 ;;
+    esac
+
+    local purge="${PURGE_DATA:-0}"
+    info "准备卸载:$( [ "$kill_master" -eq 1 ] && echo -n '母鸡(n9e+VictoriaMetrics) ' )$( [ "$kill_node" -eq 1 ] && echo -n '节点(categraf)' )"
+    if [ "$purge" = "1" ]; then
+        warn "PURGE_DATA=1:将连同数据目录一起删除(SQLite、时序数据不可恢复)"
+    else
+        info "默认保留数据目录;如需彻底清除请加 PURGE_DATA=1"
+    fi
+    # 交互式二次确认(有终端时)
+    if [ -t 0 ]; then
+        read -rp "确认卸载?输入 yes 继续: " ans
+        [ "$ans" = "yes" ] || { info "已取消"; exit 0; }
+    fi
+
+    _remove_unit() {  # $1=服务名 $2...=要删的目录
+        local svc="$1"; shift
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
+            systemctl disable --now "$svc" >/dev/null 2>&1 || true
+            rm -f "/etc/systemd/system/${svc}.service"
+            info "已停止并移除服务 ${svc}"
+        fi
+        if [ "$purge" = "1" ]; then
+            for d in "$@"; do [ -n "$d" ] && [ -d "$d" ] && rm -rf "$d" && info "已删除目录 $d"; done
+        fi
+    }
+
+    if [ "$kill_master" -eq 1 ]; then
+        _remove_unit n9e "$N9E_DIR"
+        _remove_unit victoria-metrics "$VM_DIR"
+    fi
+    if [ "$kill_node" -eq 1 ]; then
+        _remove_unit categraf "$CATEGRAF_DIR"
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+    echo
+    info "卸载完成。"
+    if [ "$purge" != "1" ]; then
+        local kept=""
+        [ "$kill_master" -eq 1 ] && kept="$kept $N9E_DIR $VM_DIR"
+        [ "$kill_node" -eq 1 ]   && kept="$kept $CATEGRAF_DIR"
+        warn "数据目录已保留:${kept# }"
+        warn "如需彻底删除: PURGE_DATA=1 sudo $0 uninstall ${target}"
+    fi
+}
+
 # ---------- 分发 ----------
 case "$ROLE" in
-    master) deploy_master ;;
-    node)   deploy_node ;;
-    *)      error "未确定角色"; exit 1 ;;
+    master)    deploy_master ;;
+    node)      deploy_node ;;
+    uninstall) do_uninstall "${UNINST_TARGET:-auto}" ;;
+    *)         error "未确定角色"; exit 1 ;;
 esac

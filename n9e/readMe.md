@@ -66,6 +66,15 @@ sudo bash n9e-deploy.sh node 母鸡IP
 
 ---
 
+### 3. 卸载
+
+```bash
+sudo ./n9e-deploy.sh uninstall            # 自动识别本机装的是母鸡还是节点,卸载之
+sudo ./n9e-deploy.sh uninstall master     # 只卸母鸡(n9e + VictoriaMetrics)
+sudo ./n9e-deploy.sh uninstall node       # 只卸节点(categraf)
+PURGE_DATA=1 sudo ./n9e-deploy.sh uninstall   # 连数据目录一起删除
+```
+
 ## 角色说明
 
 脚本用同一个文件支持两种角色,三种指定方式:
