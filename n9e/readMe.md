@@ -8,8 +8,6 @@
 - `VictoriaMetrics`:单机版时序库,存储采集到的指标,默认只保留 **1 天**数据
 - 节点端只安装一个 `Categraf` 采集器,自动接入母鸡
 
-> ⚠️ 把下文中的 `YOUR_USER/YOUR_REPO` 全部替换成你自己的 GitHub 仓库路径。
-
 ---
 
 ## 架构
