@@ -40,7 +40,7 @@
 ### 1. 部署母鸡(只做一次)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/n9e-deploy.sh -o n9e-deploy.sh
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh -o n9e-deploy.sh
 chmod +x n9e-deploy.sh
 sudo ./n9e-deploy.sh master
 ```
