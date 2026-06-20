@@ -85,10 +85,10 @@ sudo bash n9e-deploy.sh node 母鸡IP
 
 ```bash
 # 母鸡
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/n9e-deploy.sh | sudo bash -s -- master
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh | sudo bash -s -- master
 
 # 节点
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/n9e-deploy.sh | sudo bash -s -- node 母鸡IP
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh | sudo bash -s -- node 母鸡IP
 ```
 
 > 注:用一行命令装母鸡时,结尾打印的"节点命令"里脚本名会显示成 `bash`,属正常现象,按本 README 的节点命令执行即可。
