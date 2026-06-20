@@ -38,7 +38,7 @@
 ### 1. 部署母鸡(只做一次)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh -o n9e-deploy.sh
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e/n9e-deploy.sh -o n9e-deploy.sh
 chmod +x n9e-deploy.sh
 sudo ./n9e-deploy.sh master
 ```
@@ -94,10 +94,10 @@ PURGE_DATA=1 sudo ./n9e-deploy.sh uninstall   # 连数据目录一起删除
 
 ```bash
 # 母鸡
-curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh | sudo bash -s -- master
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e/n9e-deploy.sh | sudo bash -s -- master
 
 # 节点
-curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e-deploy.sh | sudo bash -s -- node 母鸡IP
+curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/n9e/n9e-deploy.sh | sudo bash -s -- node 母鸡IP
 ```
 
 > 注:用一行命令装母鸡时,结尾打印的"节点命令"里脚本名会显示成 `bash`,属正常现象,按本 README 的节点命令执行即可。
