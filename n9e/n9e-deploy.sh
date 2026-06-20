@@ -14,11 +14,19 @@
 #   不带参数运行会自动判断 / 交互询问角色:
 #     sudo ./n9e-deploy.sh
 #
+#   重启服务(自动识别母鸡/节点):
+#     sudo ./n9e-deploy.sh restart
+#     sudo ./n9e-deploy.sh restart master   # 只重启母鸡
+#     sudo ./n9e-deploy.sh restart node     # 只重启采集器
+#
 #   卸载(自动识别本机装的是母鸡还是节点):
 #     sudo ./n9e-deploy.sh uninstall            # 仅删程序与服务,保留数据
 #     sudo ./n9e-deploy.sh uninstall master     # 只卸母鸡
 #     sudo ./n9e-deploy.sh uninstall node       # 只卸节点
-#     PURGE_DATA=1 sudo ./n9e-deploy.sh uninstall   # 连数据目录一起删除
+#
+#   完全卸载(连数据目录一起删除,不可恢复):
+#     sudo ./n9e-deploy.sh purge                # = PURGE_DATA=1 uninstall
+#     sudo ./n9e-deploy.sh purge master         # 只彻底清母鸡
 #
 # 特点:母鸡端纯二进制(n9e 用 SQLite+内置 miniredis,VictoriaMetrics 存指标),
 #       无需 Docker / MySQL / Redis;节点端只装 Categraf 采集器。
@@ -65,8 +73,10 @@ ROLE="${1:-}"
 case "$ROLE" in
     master|node) shift ;;
     uninstall)   shift; UNINST_TARGET="${1:-auto}" ;;
+    purge)       shift; UNINST_TARGET="${1:-auto}"; PURGE_DATA=1 ;;
+    restart)     shift; RESTART_TARGET="${1:-auto}" ;;
     "")          ROLE="" ;;
-    *)           error "未知角色 '$ROLE'。用法: $0 [master|node|uninstall] [参数]"; exit 1 ;;
+    *)           error "未知动作 '$ROLE'。用法: $0 [master|node|restart|uninstall|purge] [参数]"; exit 1 ;;
 esac
 # node 模式:母鸡 IP 可由第 2 个参数提供
 if [ "$ROLE" = "node" ] && [ -n "${1:-}" ] && [ -z "$N9E_SERVER" ]; then
@@ -349,10 +359,52 @@ do_uninstall() {
     fi
 }
 
+############################################################
+# 重启
+############################################################
+do_restart() {
+    local target="${1:-auto}"
+    local has_master=0 has_node=0
+    systemctl list-unit-files 2>/dev/null | grep -q '^n9e\.service'      && has_master=1
+    systemctl list-unit-files 2>/dev/null | grep -q '^categraf\.service' && has_node=1
+
+    local r_master=0 r_node=0
+    case "$target" in
+        master) r_master=1 ;;
+        node)   r_node=1 ;;
+        all)    r_master=1; r_node=1 ;;
+        auto)
+            r_master=$has_master; r_node=$has_node
+            if [ "$r_master" -eq 0 ] && [ "$r_node" -eq 0 ]; then
+                warn "未检测到已安装的夜莺/采集器组件"; exit 0
+            fi ;;
+        *) error "未知重启目标 '$target',可选: master | node | all"; exit 1 ;;
+    esac
+
+    if [ "$r_master" -eq 1 ]; then
+        info "重启母鸡服务 (victoria-metrics, n9e) ..."
+        systemctl restart victoria-metrics 2>/dev/null || true
+        sleep 2
+        systemctl restart n9e
+        sleep 2
+        systemctl is-active --quiet victoria-metrics && info "victoria-metrics: 运行中" || warn "victoria-metrics: 未运行,查 journalctl -u victoria-metrics -n 30"
+        systemctl is-active --quiet n9e             && info "n9e: 运行中"             || error "n9e: 启动失败,查 journalctl -u n9e -n 30"
+    fi
+    if [ "$r_node" -eq 1 ]; then
+        info "重启采集器 (categraf) ..."
+        systemctl restart categraf
+        sleep 1
+        systemctl is-active --quiet categraf && info "categraf: 运行中" || error "categraf: 启动失败,查 journalctl -u categraf -n 30"
+    fi
+    info "重启完成。"
+}
+
 # ---------- 分发 ----------
 case "$ROLE" in
     master)    deploy_master ;;
     node)      deploy_node ;;
+    restart)   do_restart "${RESTART_TARGET:-auto}" ;;
     uninstall) do_uninstall "${UNINST_TARGET:-auto}" ;;
-    *)         error "未确定角色"; exit 1 ;;
+    purge)     do_uninstall "${UNINST_TARGET:-auto}" ;;   # PURGE_DATA=1 已在解析时设置
+    *)         error "未确定动作"; exit 1 ;;
 esac
