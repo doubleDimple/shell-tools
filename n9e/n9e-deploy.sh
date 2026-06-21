@@ -146,35 +146,39 @@ deploy_master() {
     [ -f "$CONF" ] || { error "未找到 ${CONF}"; exit 1; }
     # 注意:n9e 安装包自带的 config.toml 里可能已经有一节默认的
     # [[Pushgw.Writers]](通常指向 127.0.0.1:9090,这是给标准 Prometheus
-    # 用的默认端口)。早期版本脚本检测到"已存在"就直接跳过,导致一直
-    # 写往一个没人监听的端口,数据全部丢失。这里改为:无论是否已存在,
-    # 都强制把所有 Writers 的 Url 改写成本地 VictoriaMetrics 的真实地址,
-    # 确保链路一定指向正确的端口。
-    if grep -Eq '^\s*\[\[Pushgw\.Writers\]\]' "$CONF"; then
-        # 已存在 Writers 配置段:把紧随其后的 Url 行强制改成正确地址
-        # (用 awk 定位到 [[Pushgw.Writers]] 段后的第一行 Url = ... 并替换)
-        awk -v port="$VM_PORT" '
-            /\[\[Pushgw\.Writers\]\]/{insec=1; print; next}
-            insec==1 && /Url[ \t]*=/{
-                print "Url = \"http://127.0.0.1:" port "/api/v1/write\""
-                insec=0
-                next
-            }
-            {print}
-        ' "$CONF" > "${CONF}.tmp" && mv "${CONF}.tmp" "$CONF"
-        info "检测到已有 Pushgw.Writers 配置,已强制改写为 -> 127.0.0.1:${VM_PORT}"
-    else
-        cat >> "$CONF" <<EOF
+    # 用的默认端口)。同时本脚本可能被重复执行(重装/升级),如果只是
+    # "替换已有 Url 行"会在重复运行时产生重复 key,导致 n9e 报
+    # "Key 'Pushgw.Writers.Url' has already been defined" 而无法启动。
+    # 这里改为幂等做法:无论原文件里有几份 Writers 配置、有没有重复行,
+    # 一律先彻底删除所有 [[Pushgw.Writers]] 段落,再追加一份干净的,
+    # 确保脚本不管跑多少次结果都一样。
+    awk '
+        /^\s*\[\[Pushgw\.Writers\]\]/ { insec=1; next }
+        insec==1 {
+            # 段内的行(Url、BasicAuthUser、注释等)全部跳过,
+            # 直到遇到下一个顶层/数组 section 标记才算段落结束
+            if ($0 ~ /^\s*\[/ && $0 !~ /^\s*\[\[Pushgw\.Writers\]\]/) { insec=0 } else { next }
+        }
+        { print }
+    ' "$CONF" > "${CONF}.tmp" && mv "${CONF}.tmp" "$CONF"
 
-# —— 安装脚本追加:指标写入本地 VictoriaMetrics ——
+    cat >> "$CONF" <<EOF
+
+# —— 安装脚本追加:指标写入本地 VictoriaMetrics(幂等写入,重复执行不会产生重复段) ——
 [[Pushgw.Writers]]
 Url = "http://127.0.0.1:${VM_PORT}/api/v1/write"
 EOF
-        info "已配置 Pushgw.Writers -> 127.0.0.1:${VM_PORT}"
-    fi
-    # 校验:配置文件里不应再残留任何指向 9090 的 Writers 地址
+    info "已清理旧的 Pushgw.Writers 配置并重新写入 -> 127.0.0.1:${VM_PORT}"
+
+    # 校验:配置文件里不应再残留任何指向 9090 的 Writers 地址,
+    # 也不应出现重复的 Url key(否则 n9e 会因 toml 解析失败拒绝启动)
     if grep -q '127\.0\.0\.1:9090' "$CONF" 2>/dev/null; then
         warn "config.toml 中仍发现 127.0.0.1:9090,请手动检查 Pushgw.Writers 配置"
+    fi
+    local url_count
+    url_count=$(grep -c '^\s*Url\s*=.*api/v1/write' "$CONF" 2>/dev/null || echo 0)
+    if [ "$url_count" -gt 1 ]; then
+        warn "config.toml 中检测到 ${url_count} 处 Writers Url 配置,可能导致 n9e 启动失败,请手动检查"
     fi
 
     # 3) systemd
