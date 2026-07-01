@@ -55,7 +55,7 @@ detect_system() {
                 log_error "不支持的系统: $ID"
                 exit 1
                 ;;
-        case
+        esac
     else
         log_error "无法检测系统类型"
         exit 1
@@ -110,7 +110,6 @@ EOF
 # 更新系统
 update_system() {
     log_step "更新系统软件包..."
-    # 避免 upgrade 锁死交互，加上 || true 容错
     sudo apt update && sudo apt upgrade -y || log_warn "系统全面更新期间有部分依赖未完全升级，跳过继续。"
 }
 
@@ -144,7 +143,6 @@ install_packages() {
             log_info "$package 已安装"
         else
             log_info "安装 $package..."
-            # 关键改动：加入 --ignore-missing，且即使失败 (|| true) 也不中断循环
             sudo apt install -y --ignore-missing "$package" || log_warn "未能装上 $package，可能当前系统版本仓库无此组件，跳过。"
         fi
     done
@@ -175,10 +173,8 @@ install_docker() {
         log_info "准备Docker安装环境..."
         sudo apt update -y || true
         
-        # 兜底安装依赖
         sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release --ignore-missing || true
         
-        # 根据系统类型设置正确的仓库
         if [[ "$ID" == "ubuntu" ]]; then
             log_info "配置Ubuntu Docker仓库..."
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg || true
@@ -212,7 +208,6 @@ install_docker() {
             log_info "已将用户 $USER 添加到docker组"
         fi
         
-        # 启动服务
         sudo systemctl enable docker || true
         sudo systemctl start docker || true
         
