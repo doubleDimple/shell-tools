@@ -140,7 +140,9 @@ install_packages() {
             log_info "$package 已安装"
         else
             log_info "安装 $package..."
-            sudo apt install -y "$package"
+            if ! sudo apt install -y "$package"; then
+                log_warn "$package 安装失败(可能该仓库已不再提供此包，如 Debian 13 已移除 software-properties-common)，跳过继续执行"
+            fi
         fi
     done
 
