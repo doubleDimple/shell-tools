@@ -48,7 +48,7 @@ JVM_OPTS="-XX:+UseG1GC"
 
 is_china_network() {
     log_info "正在检测网络环境..."
-    
+
     if curl -s --connect-timeout 5 --max-time 5 https://google.com > /dev/null 2>&1; then
         log_info "检测到可访问Google，判断为国外网络环境"
         return 1
@@ -107,7 +107,7 @@ check_websockify() {
 
 install_websockify() {
     log_info "开始安装Websockify..."
-    
+
     if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
         log_info "Python未安装，正在安装Python..."
         if command -v apt &> /dev/null; then
@@ -124,7 +124,7 @@ install_websockify() {
             exit 1
         fi
     fi
-    
+
     PYTHON_CMD=""
     if command -v python3 &> /dev/null; then
         PYTHON_CMD="python3"
@@ -134,7 +134,7 @@ install_websockify() {
         log_error "Python安装后仍无法找到，请检查安装"
         exit 1
     fi
-    
+
     PIP_CMD=""
     if command -v pip3 &> /dev/null; then
         PIP_CMD="pip3"
@@ -158,7 +158,7 @@ install_websockify() {
             exit 1
         fi
     fi
-    
+
     local installed_via_package=false
     if command -v apt &> /dev/null; then
         log_info "尝试通过apt安装websockify..."
@@ -185,7 +185,7 @@ install_websockify() {
             log_warn "dnf安装websockify失败，将使用pip安装"
         fi
     fi
-    
+
     if [ "$installed_via_package" = false ]; then
         log_info "使用pip安装websockify..."
         if $PIP_CMD install websockify; then
@@ -201,7 +201,7 @@ install_websockify() {
             fi
         fi
     fi
-    
+
     if ! command -v websockify &> /dev/null; then
         log_error "websockify安装失败，命令不可用"
         exit 1
@@ -243,11 +243,11 @@ check_and_download_jar() {
 
 get_public_ip() {
     log_info "正在尝试获取公网IP..."
-    
+
     local ip=$(curl -s --connect-timeout 5 --max-time 10 https://api.ipify.org || \
                curl -s --connect-timeout 5 --max-time 10 http://ifconfig.me/ip || \
                curl -s --connect-timeout 5 --max-time 10 http://ip.sb)
-    
+
     if echo "$ip" | grep -E -q '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
         log_success "成功获取公网IP: $ip"
         echo "$ip"
@@ -266,15 +266,15 @@ start() {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
-    
+
     check_java
-    
+
     check_websockify
-    
+
     check_and_download_jar
-    
+
     create_symlink
-    
+
     log_success "环境准备完成，现在可以使用 'oci-start' 命令"
 
     if pgrep -f "$JAR_PATH" > /dev/null; then
@@ -307,9 +307,9 @@ stop() {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
-    
+
     create_symlink
-    
+
     PIDS=$(pgrep -f "$JAR_PATH")
     if [ -z "$PIDS" ]; then
         log_warn "应用未在运行"
@@ -317,9 +317,9 @@ stop() {
     fi
 
     log_info "正在停止应用... (PIDS: $PIDS)"
-    
+
     kill $PIDS 2>/dev/null
-    
+
     local count=0
     while [ $count -lt 10 ]; do
         if ! pgrep -f "$JAR_PATH" > /dev/null; then
@@ -330,12 +330,12 @@ stop() {
         count=$((count + 1))
         log_info "等待进程停止... ($count/10)"
     done
-    
+
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_warn "强制停止应用..."
         kill -9 $(pgrep -f "$JAR_PATH") 2>/dev/null
         sleep 2
-        
+
         if pgrep -f "$JAR_PATH" > /dev/null; then
             log_error "无法停止应用"
             return 1
@@ -344,7 +344,7 @@ stop() {
             return 0
         fi
     fi
-    
+
     log_success "应用已停止"
     return 0
 }
@@ -359,7 +359,7 @@ restart() {
     if pgrep -f "$JAR_PATH" > /dev/null; then
         # 1. 获取当前运行的进程PID (取第一个)
         local pid=$(pgrep -f "$JAR_PATH" | head -n 1)
-        
+
         # 2. 从进程启动命令中提取 server.port 的值
         # ps -p <pid> -o args= 会输出完整的启动命令
         local running_port=$(ps -p "$pid" -o args= | grep -o 'server\.port=[0-9]*' | cut -d '=' -f 2)
@@ -376,11 +376,11 @@ restart() {
         fi
     fi
     # --- 新增逻辑结束 ---
-    
+
     check_java
     check_websockify
     create_symlink
-    
+
     stop
     start
 }
@@ -390,11 +390,11 @@ status() {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
-    
+
     check_java
     check_websockify
     create_symlink
-    
+
     if pgrep -f "$JAR_PATH" > /dev/null; then
         log_success "应用正在运行"
     else
@@ -407,11 +407,12 @@ update_latest() {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
-    
+
     check_java
     check_websockify
+    check_dependencies # <--- 引入前置依赖与自动安装工具检查
 
-    # === 新增逻辑开始：在停止服务前，先记录当前端口 ===
+    # === 在停止服务前，先记录当前端口 ===
     local PREVIOUS_PORT=""
     if pgrep -f "$JAR_PATH" > /dev/null; then
         local pid=$(pgrep -f "$JAR_PATH" | head -n 1)
@@ -420,56 +421,89 @@ update_latest() {
             log_info "检测到当前运行端口为: $PREVIOUS_PORT，更新后将维持该端口。"
         fi
     fi
-    # === 新增逻辑结束 ===
-    
+
     log_info "开始检查更新..."
     mkdir -p "$JAR_DIR"
-    
-    if ! command -v curl &> /dev/null; then
-        log_info "安装curl..."
-        if command -v apt &> /dev/null; then
-            apt update -y
-            apt install -y curl
-        elif command -v yum &> /dev/null; then
-            yum install -y curl
-        elif command -v dnf &> /dev/null; then
-            dnf install -y curl
-        else
-            log_error "不支持的操作系统，请手动安装curl"
-            exit 1
-        fi
-    fi
-    
-    local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
-    
-    log_info "获取最新版本信息..."
-    local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
 
-    if [ -z "$download_url" ]; then
+    local api_url="https://api.github.com/repos/doubleDimple/oci-start/releases/latest"
+    log_info "获取最新版本信息..."
+
+    # 确保有 jq 才能安全解析
+    if command -v jq &> /dev/null; then
+        local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' 2>/dev/null)
+        local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | jq -r '.tag_name' 2>/dev/null)
+    else
+        # 兜底老逻辑，防止极端情况下 jq 还是没装上
+        local download_url=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep "browser_download_url.*jar" | cut -d '"' -f 4)
+        local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep '"tag_name":' | cut -d '"' -f 4)
+    fi
+
+    if [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
         log_error "无法获取最新版本信息，请检查网络连接"
         return 1
     fi
-    
+
     if is_china_network; then
         download_url="https://speed.objboy.com/$download_url"
         log_info "使用国内加速下载地址"
     fi
 
-    local latest_version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" | grep '"tag_name":' | cut -d '"' -f 4)
     log_info "找到最新版本: ${latest_version}"
     log_info "开始下载..."
 
     local temp_file="${JAR_PATH}.temp"
     local backup_file="${JAR_PATH}.${latest_version}.bak"
-
     log_info "下载文件到: $temp_file"
-    if curl -L --connect-timeout 30 --max-time 300 -o "$temp_file" "$download_url"; then
+
+    # ==================== 动态线程与多线程下载核心逻辑 ====================
+    local cpu_cores=1
+    if command -v nproc &> /dev/null; then
+        cpu_cores=$(nproc)
+    elif [ -f /proc/cpuinfo ]; then
+        cpu_cores=$(grep -c ^processor /proc/cpuinfo)
+    fi
+
+    local threads=$(( cpu_cores * 4 ))
+    if [ $threads -lt 4 ]; then threads=4; fi
+    if [ $threads -gt 16 ]; then threads=16; fi
+
+    log_info "检测到系统 CPU 核心数: $cpu_cores，动态启用下载线程数: $threads"
+    local download_success=false
+
+    # 1. 优先使用 aria2c
+    if [ "$download_success" = false ] && command -v aria2c &> /dev/null; then
+        log_info "使用 aria2c 进行多线程下载..."
+        local pure_temp_filename=$(basename "$temp_file")
+        # 修复绝对路径：-d 指定目录 -o 指定纯文件名
+        if aria2c -x "$threads" -s "$threads" -j "$threads" -d "$JAR_DIR" -o "$pure_temp_filename" "$download_url"; then
+            download_success=true
+        fi
+    fi
+
+    # 2. 备选使用 axel
+    if [ "$download_success" = false ] && command -v axel &> /dev/null; then
+        log_info "aria2c 不可用/下载失败，切换使用 axel 进行多线程下载..."
+        if axel -n "$threads" -o "$temp_file" "$download_url"; then
+            download_success=true
+        fi
+    fi
+
+    # 3. 终极兜底使用 curl
+    if [ "$download_success" = false ]; then
+        log_warn "多线程工具不可用，降级使用标准单线程 curl 下载..."
+        if curl -L --connect-timeout 30 --max-time 300 -o "$temp_file" "$download_url"; then
+            download_success=true
+        fi
+    fi
+    # ======================================================================
+
+    if [ "$download_success" = true ]; then
         if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
             log_error "下载的文件无效"
             rm -f "$temp_file"
             return 1
         fi
-        
+
         if command -v file &> /dev/null; then
             if ! file "$temp_file" | grep -q "Java archive\|Zip archive"; then
                 log_error "下载的文件不是有效的JAR文件"
@@ -477,16 +511,15 @@ update_latest() {
                 return 1
             fi
         fi
-        
+
         log_success "文件下载完成"
-        
         log_info "停止当前应用..."
         if ! stop; then
             log_error "停止应用失败"
             rm -f "$temp_file"
             return 1
         fi
-        
+
         if [ -f "$JAR_PATH" ]; then
             if cp "$JAR_PATH" "$backup_file"; then
                 log_info "原JAR包已备份为: $backup_file"
@@ -500,15 +533,12 @@ update_latest() {
         if mv "$temp_file" "$JAR_PATH"; then
             chmod +x "$JAR_PATH"
             log_success "JAR包更新完成，版本：${latest_version}"
-            
             log_info "启动新版本..."
-            
-            # === 新增逻辑开始：恢复之前的端口 ===
+
             if [ -n "$PREVIOUS_PORT" ]; then
                 CUSTOM_PORT=$PREVIOUS_PORT
             fi
-            # === 新增逻辑结束 ===
-            
+
             if start; then
                 sleep 5
                 if pgrep -f "$JAR_PATH" > /dev/null; then
@@ -540,13 +570,53 @@ update_latest() {
     fi
 }
 
+check_dependencies() {
+    log_info "检查多线程下载及解析依赖..."
+
+    local deps_to_install=()
+
+    # 检查 jq (必须，解析API要用)
+    if ! command -v jq &> /dev/null; then
+        deps_to_install+=("jq")
+    fi
+
+    # 检查并优先尝试安装 aria2
+    if ! command -v aria2c &> /dev/null && ! command -v axel &> /dev/null; then
+        log_info "未检测到多线程下载工具，将默认尝试安装 aria2"
+        deps_to_install+=("aria2")
+    fi
+
+    # 如果有需要安装的依赖
+    if [ ${#deps_to_install[@]} -ne 0 ]; then
+        log_warn "发现缺失依赖: ${deps_to_install[*]}，准备自动安装..."
+        if command -v apt &> /dev/null; then
+            apt update -y
+            # 映射包名：aria2 对应的 apt 包名通常是 aria2
+            DEBIAN_FRONTEND=noninteractive apt install -y "${deps_to_install[@]}"
+        elif command -v yum &> /dev/null; then
+            yum update -y
+            # epel 源通常包含 jq 和 aria2
+            yum install -y epel-release 2>/dev/null
+            yum install -y "${deps_to_install[@]}"
+        elif command -v dnf &> /dev/null; then
+            dnf update -y
+            dnf install -y epel-release 2>/dev/null
+            dnf install -y "${deps_to_install[@]}"
+        else
+            log_warn "未知包管理器，请稍后手动安装: ${deps_to_install[*]}"
+        fi
+    else
+        log_success "多线程下载及解析依赖检查通过"
+    fi
+}
+
 
 uninstall() {
     cd "$SCRIPT_REAL_DIR" || {
         log_error "无法切换到脚本目录: $SCRIPT_REAL_DIR"
         exit 1
     }
-    
+
     echo -e "${YELLOW}确认卸载说明:${NC}"
     echo -e "1. 将停止并删除所有应用相关文件"
     echo -e "2. 此操作不可逆，请确认"
@@ -572,7 +642,7 @@ uninstall() {
     fi
 
     [ -f "$JAR_PATH" ] && rm -f "$JAR_PATH"
-    
+
     find "$JAR_DIR" -name "*.bak" -o -name "*.backup" -o -name "*.temp" -o -name "*.log" -delete 2>/dev/null
 
     if [ -L "$SYMLINK_PATH" ]; then
@@ -592,24 +662,24 @@ uninstall() {
 parse_args() {
     # 只处理 $1 开始的参数列表
     local args=("$@") # 将所有参数复制到局部数组
-    
+
     for (( i=0; i<${#args[@]}; i++ )); do
         arg="${args[i]}"
         next_arg="${args[i+1]}"
-        
+
         if [[ "$arg" == "-p" || "$arg" == "--port" ]]; then
             # 检查 $2 是否存在
             if [ -z "$next_arg" ]; then
                 log_error "缺少端口号参数，请使用 -p <端口号> 指定。"
                 exit 1
             fi
-            
+
             # 检查 $2 是否为数字 (POSIX兼容)
             if ! [ "$next_arg" -eq "$next_arg" ] 2>/dev/null; then
                 log_error "端口参数无效: $next_arg。端口号必须是数字。"
                 exit 1
             fi
-            
+
             # 检查范围
             if [ "$next_arg" -ge 1 ] && [ "$next_arg" -le 65535 ]; then
                 CUSTOM_PORT="$next_arg"
