@@ -45,7 +45,7 @@ detect_system() {
         OS=$NAME
         VER=$VERSION_ID
         log_info "检测到系统: $OS $VER"
-        
+
         case $ID in
             ubuntu|debian)
                 PACKAGE_MANAGER="apt"
@@ -64,20 +64,20 @@ detect_system() {
 # 修复Debian源配置
 fix_debian_sources() {
     log_step "修复Debian软件源配置..."
-    
+
     if [[ "$ID" == "debian" ]]; then
         log_info "检测到Debian系统，修复源配置..."
-        
+
         # 备份原始sources.list
         if [[ -f /etc/apt/sources.list ]]; then
             sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d_%H%M%S)
             log_info "已备份原始sources.list"
         fi
-        
+
         # 获取版本代号
         VERSION_CODENAME=$(lsb_release -cs)
         log_info "检测到Debian版本: $VERSION_CODENAME"
-        
+
         # 配置正确的sources.list
         log_info "配置Debian官方镜像源..."
         sudo tee /etc/apt/sources.list > /dev/null <<EOF
@@ -93,9 +93,9 @@ deb-src http://deb.debian.org/debian $VERSION_CODENAME-updates main contrib non-
 deb http://security.debian.org/debian-security $VERSION_CODENAME-security main contrib non-free
 deb-src http://security.debian.org/debian-security $VERSION_CODENAME-security main contrib non-free
 EOF
-        
+
         log_info "已修复Debian源配置"
-        
+
         # 清理并更新
         sudo apt clean
         sudo apt update -y
@@ -113,11 +113,11 @@ update_system() {
 # 安装必要组件
 install_packages() {
     log_step "安装必要组件..."
-    
+
     # 基础工具
     local packages=(
         "curl"
-        "wget" 
+        "wget"
         "git"
         "vim"
         "nano"
@@ -134,96 +134,98 @@ install_packages() {
         "gnupg"
         "lsb-release"
     )
-    
+
     for package in "${packages[@]}"; do
         if dpkg -l | grep -q "^ii  $package "; then
             log_info "$package 已安装"
         else
             log_info "安装 $package..."
-            sudo apt install -y "$package"
+            if ! sudo apt install -y "$package"; then
+                log_warn "$package 安装失败(可能该仓库已不再提供此包，如 Debian 13 已移除 software-properties-common)，跳过继续执行"
+            fi
         fi
     done
-    
+
     log_info "软件包安装完成"
 }
 
 # 清理Docker配置（修复函数）
 clean_docker_repos() {
     log_info "清理可能存在的错误Docker仓库配置..."
-    
+
     # 删除可能存在的Docker仓库文件
     sudo rm -f /etc/apt/sources.list.d/docker.list
     sudo rm -f /etc/apt/sources.list.d/docker.list.save
     sudo rm -f /usr/share/keyrings/docker-archive-keyring.gpg
-    
+
     log_info "Docker仓库配置清理完成"
 }
 
 # 安装Docker（修复版本）
 install_docker() {
     log_step "检查并安装Docker..."
-    
+
     if command -v docker &> /dev/null; then
         log_info "Docker已安装，版本: $(docker --version)"
         return 0
     else
         log_info "安装Docker..."
-        
+
         # 首先清理可能存在的错误配置
         clean_docker_repos
-        
+
         # 确保源配置正确后再安装Docker
         log_info "准备Docker安装环境..."
         sudo apt update -y
-        
+
         # 安装必要的依赖
         sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release
-        
+
         # 根据系统类型设置正确的仓库
         if [[ "$ID" == "ubuntu" ]]; then
             # Ubuntu系统
             log_info "配置Ubuntu Docker仓库..."
-            
+
             # 添加Docker官方GPG密钥
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-            
+
             # 添加Docker仓库
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
+
         elif [[ "$ID" == "debian" ]]; then
             # Debian系统
             log_info "配置Debian Docker仓库..."
-            
+
             # 添加Docker官方GPG密钥
             curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-            
+
             # 添加Docker仓库
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
+
         else
             log_error "不支持的系统类型: $ID"
             return 1
         fi
-        
+
         # 更新包索引
         log_info "更新软件包列表..."
         sudo apt update -y
-        
+
         # 安装Docker
         log_info "安装Docker Engine..."
         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-        
+
         # 将当前用户添加到docker组（如果不是root用户）
         if [[ $EUID -ne 0 ]]; then
             sudo usermod -aG docker $USER
             log_info "已将用户 $USER 添加到docker组"
             log_warn "请重新登录或运行 'newgrp docker' 使docker组权限生效"
         fi
-        
+
         # 启用并启动Docker服务
         sudo systemctl enable docker
         sudo systemctl start docker
-        
+
         # 验证安装
         if command -v docker &> /dev/null; then
             log_info "Docker安装完成，版本: $(docker --version)"
@@ -237,38 +239,38 @@ install_docker() {
 # 安装Docker Compose（保持原有逻辑，因为新版Docker已包含compose插件）
 install_docker_compose() {
     log_step "检查Docker Compose..."
-    
+
     # 检查docker compose插件（新版本）
     if docker compose version &> /dev/null; then
         log_info "Docker Compose Plugin已安装，版本: $(docker compose version)"
         return 0
     fi
-    
+
     # 检查独立的docker-compose（旧版本）
     if command -v docker-compose &> /dev/null; then
         log_info "Docker Compose已安装，版本: $(docker-compose --version)"
         return 0
     fi
-    
+
     # 如果都没有，安装独立版本
     log_info "安装Docker Compose独立版本..."
-    
+
     # 获取最新版本号
     DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'"' -f4)
-    
+
     if [[ -z "$DOCKER_COMPOSE_VERSION" ]]; then
         log_warn "无法获取最新版本，使用默认版本"
         DOCKER_COMPOSE_VERSION="v2.24.0"
     fi
-    
+
     log_info "下载Docker Compose $DOCKER_COMPOSE_VERSION..."
-    
+
     # 下载Docker Compose
     sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    
+
     # 添加执行权限
     sudo chmod +x /usr/local/bin/docker-compose
-    
+
     # 验证安装
     if command -v docker-compose &> /dev/null; then
         log_info "Docker Compose安装完成，版本: $(docker-compose --version)"
@@ -281,7 +283,7 @@ install_docker_compose() {
 # 设置上海时区
 set_timezone() {
     log_step "设置时区为Asia/Shanghai..."
-    
+
     current_tz=$(timedatectl show --property=Timezone --value)
     if [[ "$current_tz" == "Asia/Shanghai" ]]; then
         log_info "时区已经是Asia/Shanghai"
@@ -289,7 +291,7 @@ set_timezone() {
         sudo timedatectl set-timezone Asia/Shanghai
         log_info "时区设置完成"
     fi
-    
+
     # 显示当前时间
     log_info "当前时间: $(date)"
 }
@@ -297,13 +299,13 @@ set_timezone() {
 # 配置彩色命令行
 setup_colorful_terminal() {
     log_step "配置彩色命令行..."
-    
+
     # 备份原始.bashrc
     if [[ -f ~/.bashrc ]]; then
         cp ~/.bashrc ~/.bashrc.backup.$(date +%Y%m%d_%H%M%S)
         log_info "已备份原始.bashrc文件"
     fi
-    
+
     # 检查是否已经启用了彩色提示符
     if grep -q "force_color_prompt=yes" ~/.bashrc; then
         log_info "彩色提示符已启用"
@@ -314,13 +316,13 @@ setup_colorful_terminal() {
             log_info "已启用force_color_prompt"
         fi
     fi
-    
+
     # 检查是否已经添加过自定义配置
     if grep -q "自定义彩色配置 (由init.sh添加)" ~/.bashrc; then
         log_info "自定义彩色配置已存在"
     else
         # 添加自定义彩色配置
-        cat >> ~/.bashrc << 'EOF'
+        cat >> ~/.bashrc << 'BASHRC_EOF'
 
 # === 自定义彩色配置 (由init.sh添加) ===
 # 启用彩色提示符
@@ -375,7 +377,7 @@ alias docker-compose-up='docker-compose up -d'
 alias docker-compose-down='docker-compose down'
 alias docker-compose-logs='docker-compose logs -f'
 
-EOF
+BASHRC_EOF
         log_info "自定义彩色配置添加完成"
     fi
 }
@@ -383,7 +385,7 @@ EOF
 # 测试Docker安装
 test_docker() {
     log_step "测试Docker安装..."
-    
+
     if command -v docker &> /dev/null; then
         log_info "运行Docker测试..."
         if sudo docker run --rm hello-world &> /dev/null; then
@@ -404,29 +406,29 @@ show_completion() {
     log_info "======================================"
     echo
     log_info "已完成的配置:"
-    
+
     if [[ "$ID" == "debian" ]]; then
         echo "  ✓ Debian软件源修复"
     fi
     echo "  ✓ 系统软件包更新"
     echo "  ✓ 必要组件安装"
-    
+
     if command -v docker &> /dev/null; then
         echo "  ✓ Docker安装成功"
     else
         echo "  ✗ Docker安装失败"
     fi
-    
+
     if docker compose version &> /dev/null || command -v docker-compose &> /dev/null; then
         echo "  ✓ Docker Compose可用"
     else
         echo "  ✗ Docker Compose不可用"
     fi
-    
+
     echo "  ✓ 时区设置为Asia/Shanghai"
     echo "  ✓ 彩色命令行配置"
     echo
-    
+
     log_warn "请运行以下命令使配置生效:"
     echo "  source ~/.bashrc"
     if [[ $EUID -ne 0 ]] && command -v docker &> /dev/null; then
@@ -435,12 +437,12 @@ show_completion() {
     echo
     log_warn "或者重新登录系统"
     echo
-    
+
     # 显示版本信息
     log_info "安装的软件版本:"
     if command -v docker &> /dev/null; then
         echo "  Docker: $(docker --version)"
-        
+
         # 检查Docker服务状态
         if systemctl is-active --quiet docker; then
             echo "  Docker服务: ✓ 运行中"
@@ -450,7 +452,7 @@ show_completion() {
     else
         echo "  Docker: ✗ 未安装"
     fi
-    
+
     if docker compose version &> /dev/null; then
         echo "  Docker Compose Plugin: $(docker compose version --short)"
     elif command -v docker-compose &> /dev/null; then
@@ -458,13 +460,13 @@ show_completion() {
     else
         echo "  Docker Compose: ✗ 不可用"
     fi
-    
+
     echo
     log_info "系统时间信息:"
     echo "  当前时间: $(date)"
     echo "  时区: $(timedatectl show --property=Timezone --value)"
     echo
-    
+
     if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
         log_info "Docker快速使用指南:"
         echo "  sudo docker run hello-world     # 测试Docker"
@@ -484,10 +486,10 @@ show_completion() {
 main() {
     log_info "开始Linux系统初始化..."
     echo
-    
+
     check_root
     detect_system
-    
+
     echo
     log_info "将自动执行以下操作:"
     if [[ "$ID" == "debian" ]]; then
@@ -500,13 +502,13 @@ main() {
     echo "  • 时区设置为Asia/Shanghai"
     echo "  • 彩色命令行配置"
     echo
-    
+
     # 只有Debian系统才修复源
     if [[ "$ID" == "debian" ]]; then
         fix_debian_sources
         echo
     fi
-    
+
     update_system
     echo
     install_packages
