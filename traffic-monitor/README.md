@@ -16,7 +16,6 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/traffic-monitor/install.sh)
 ```
-
 或：
 
 ```bash
