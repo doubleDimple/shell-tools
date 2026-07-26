@@ -123,6 +123,31 @@ run_setup() {
   bash "${INSTALL_DIR}/traffic-monitor.sh" --setup
 }
 
+# 可选：安装后写入 ROLE（agent 非交互场景）
+apply_role_hint() {
+  local role="${ROLE:-}"
+  [[ -z "$role" ]] && return 0
+  local conf="${INSTALL_DIR}/config.conf"
+  [[ -f "$conf" ]] || return 0
+  if grep -qE '^ROLE=' "$conf" 2>/dev/null; then
+    sed -i.bak "s/^ROLE=.*/ROLE=\"${role}\"/" "$conf" 2>/dev/null || \
+      sed -i '' "s/^ROLE=.*/ROLE=\"${role}\"/" "$conf" 2>/dev/null || true
+    rm -f "${conf}.bak" 2>/dev/null || true
+  else
+    echo "ROLE=\"${role}\"" >> "$conf"
+  fi
+  if [[ "$role" == "agent" ]]; then
+    if grep -qE '^TG_POLL_ENABLED=' "$conf" 2>/dev/null; then
+      sed -i.bak 's/^TG_POLL_ENABLED=.*/TG_POLL_ENABLED="false"/' "$conf" 2>/dev/null || \
+        sed -i '' 's/^TG_POLL_ENABLED=.*/TG_POLL_ENABLED="false"/' "$conf" 2>/dev/null || true
+      rm -f "${conf}.bak" 2>/dev/null || true
+    else
+      echo 'TG_POLL_ENABLED="false"' >> "$conf"
+    fi
+  fi
+  info "已设置 ROLE=${role}"
+}
+
 main() {
   echo ""
   echo "$(c_bold "╔══════════════════════════════════════╗")"
@@ -136,6 +161,7 @@ main() {
   install_deps
   download_files
   link_bin
+  apply_role_hint
   run_setup
 
   echo ""
@@ -146,6 +172,7 @@ main() {
   echo "  配置:   ${INSTALL_DIR}/traffic-monitor.sh --setup"
   echo "  状态:   ${INSTALL_DIR}/traffic-monitor.sh --status"
   echo "  守护:   ${INSTALL_DIR}/traffic-monitor.sh --start"
+  echo "  多机:   ${INSTALL_DIR}/traffic-monitor.sh master enroll root@IP --tag name"
   echo ""
 }
 

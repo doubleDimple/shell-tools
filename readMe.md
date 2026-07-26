@@ -59,7 +59,7 @@ wget -O smart-exec.sh https://raw.githubusercontent.com/doubleDimple/shell-tools
 
 ## traffic-monitor · 流量监控
 
-服务器网卡日/月流量监控，阈值告警，Telegram 内联菜单配置。
+服务器网卡日/月流量监控，阈值告警，Telegram 内联菜单配置；支持 **Master SSH 纳管多机**（`master enroll root@IP`）。
 
 一键安装：
 

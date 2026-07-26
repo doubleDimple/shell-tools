@@ -1,6 +1,13 @@
 # 流量监控配置示例
 # 复制为 config.conf 后修改，或直接运行脚本交互配置：
 #   ./traffic-monitor.sh --setup
+#
+# 多机 Master：
+#   ROLE="master"
+#   ./traffic-monitor.sh master enroll root@1.2.3.4 --tag sg-1
+
+# standalone | master | agent
+ROLE="standalone"
 
 INTERFACE="eth0"
 DAILY_LIMIT_GB="100"
@@ -9,6 +16,8 @@ CHECK_INTERVAL_SEC="300"
 TG_BOT_TOKEN=""
 TG_CHAT_ID=""
 TG_ENABLED="false"
+# agent 必须为 false（只有 Master/Standalone 轮询 Telegram 菜单）
+TG_POLL_ENABLED="true"
 ALERT_THRESHOLDS="50,80,90,95,100"
 ALERT_COOLDOWN_MIN="60"
 COUNT_MODE="total"
@@ -16,3 +25,7 @@ EXCLUDE_LO="true"
 LOG_MAX_LINES="2000"
 TIMEZONE=""
 HOSTNAME_TAG="server"
+
+# Master SSH 选项（需 root 密钥免密）
+SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30"
+REMOTE_INSTALL_DIR="/opt/traffic-monitor"

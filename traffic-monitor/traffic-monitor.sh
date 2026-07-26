@@ -5,6 +5,7 @@
 #  - 阈值告警 + Telegram 通报
 #  - 终端交互：方向键 / j-k 上下选择，回车确认
 #  - Telegram：内联按钮菜单 + 对话式配置（非常驻底部键盘）
+#  - 多机：Master SSH 纳管 Agent（master enroll / status / check …）
 #===============================================================================
 set -euo pipefail
 
@@ -21,6 +22,7 @@ ALERT_STATE_FILE="${STATE_DIR}/alerts.state"
 PID_FILE="${STATE_DIR}/monitor.pid"
 TG_OFFSET_FILE="${STATE_DIR}/tg_offset"
 TG_SESSION_FILE="${STATE_DIR}/tg_session"
+MACHINES_FILE="${SCRIPT_DIR}/machines.conf"
 CRON_TAG="traffic-monitor"
 
 # 默认配置（可被 config.conf 覆盖）
@@ -38,6 +40,15 @@ EXCLUDE_LO="true"             # 排除 loopback
 LOG_MAX_LINES="2000"
 TIMEZONE=""                   # 空则用系统时区
 HOSTNAME_TAG="$(hostname -s 2>/dev/null || echo server)"
+
+# 角色: standalone（单机默认）| master（中控）| agent（被纳管节点）
+ROLE="standalone"
+# 是否轮询 Telegram getUpdates；空则按 ROLE 推断（agent=false，其它=true）
+TG_POLL_ENABLED=""
+# Master → Agent SSH 参数（空格分隔的 -o 选项）
+SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30"
+# Agent 默认安装目录
+REMOTE_INSTALL_DIR="/opt/traffic-monitor"
 
 #-------------------------------------------------------------------------------
 # 工具函数
@@ -126,10 +137,38 @@ progress_bar() {
 #-------------------------------------------------------------------------------
 # 配置加载 / 保存
 #-------------------------------------------------------------------------------
+# 配置值转义（写入双引号赋值）
+cfg_escape() {
+  printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\$/g' -e 's/`/\\`/g'
+}
+
+# 是否应轮询 Telegram（仅 Master/Standalone 交互菜单需要）
+tg_should_poll() {
+  local v="${TG_POLL_ENABLED:-}"
+  if [[ -z "$v" ]]; then
+    if [[ "${ROLE:-standalone}" == "agent" ]]; then
+      v="false"
+    else
+      v="true"
+    fi
+  fi
+  [[ "$v" == "true" && "${TG_ENABLED:-false}" == "true" && -n "${TG_BOT_TOKEN:-}" ]]
+}
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
+  fi
+  ROLE="${ROLE:-standalone}"
+  REMOTE_INSTALL_DIR="${REMOTE_INSTALL_DIR:-/opt/traffic-monitor}"
+  SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30}"
+  if [[ -z "${TG_POLL_ENABLED:-}" ]]; then
+    if [[ "$ROLE" == "agent" ]]; then
+      TG_POLL_ENABLED="false"
+    else
+      TG_POLL_ENABLED="true"
+    fi
   fi
   if [[ -n "$TIMEZONE" ]]; then
     export TZ="$TIMEZONE"
@@ -137,24 +176,36 @@ load_config() {
 }
 
 save_config() {
+  # 规范化轮询默认值再落盘
+  if [[ -z "${TG_POLL_ENABLED:-}" ]]; then
+    if [[ "${ROLE:-standalone}" == "agent" ]]; then
+      TG_POLL_ENABLED="false"
+    else
+      TG_POLL_ENABLED="true"
+    fi
+  fi
   cat > "$CONFIG_FILE" <<EOF
 # 流量监控配置 - 由 traffic-monitor.sh 自动生成
 # 修改后下次运行生效；也可用菜单修改
 
-INTERFACE="${INTERFACE}"
-DAILY_LIMIT_GB="${DAILY_LIMIT_GB}"
-MONTHLY_LIMIT_GB="${MONTHLY_LIMIT_GB}"
-CHECK_INTERVAL_SEC="${CHECK_INTERVAL_SEC}"
-TG_BOT_TOKEN="${TG_BOT_TOKEN}"
-TG_CHAT_ID="${TG_CHAT_ID}"
-TG_ENABLED="${TG_ENABLED}"
-ALERT_THRESHOLDS="${ALERT_THRESHOLDS}"
-ALERT_COOLDOWN_MIN="${ALERT_COOLDOWN_MIN}"
-COUNT_MODE="${COUNT_MODE}"
-EXCLUDE_LO="${EXCLUDE_LO}"
-LOG_MAX_LINES="${LOG_MAX_LINES}"
-TIMEZONE="${TIMEZONE}"
-HOSTNAME_TAG="${HOSTNAME_TAG}"
+ROLE="$(cfg_escape "${ROLE:-standalone}")"
+INTERFACE="$(cfg_escape "${INTERFACE}")"
+DAILY_LIMIT_GB="$(cfg_escape "${DAILY_LIMIT_GB}")"
+MONTHLY_LIMIT_GB="$(cfg_escape "${MONTHLY_LIMIT_GB}")"
+CHECK_INTERVAL_SEC="$(cfg_escape "${CHECK_INTERVAL_SEC}")"
+TG_BOT_TOKEN="$(cfg_escape "${TG_BOT_TOKEN}")"
+TG_CHAT_ID="$(cfg_escape "${TG_CHAT_ID}")"
+TG_ENABLED="$(cfg_escape "${TG_ENABLED}")"
+TG_POLL_ENABLED="$(cfg_escape "${TG_POLL_ENABLED}")"
+ALERT_THRESHOLDS="$(cfg_escape "${ALERT_THRESHOLDS}")"
+ALERT_COOLDOWN_MIN="$(cfg_escape "${ALERT_COOLDOWN_MIN}")"
+COUNT_MODE="$(cfg_escape "${COUNT_MODE}")"
+EXCLUDE_LO="$(cfg_escape "${EXCLUDE_LO}")"
+LOG_MAX_LINES="$(cfg_escape "${LOG_MAX_LINES}")"
+TIMEZONE="$(cfg_escape "${TIMEZONE}")"
+HOSTNAME_TAG="$(cfg_escape "${HOSTNAME_TAG}")"
+SSH_OPTS="$(cfg_escape "${SSH_OPTS}")"
+REMOTE_INSTALL_DIR="$(cfg_escape "${REMOTE_INSTALL_DIR:-/opt/traffic-monitor}")"
 EOF
   chmod 600 "$CONFIG_FILE"
   log INFO "配置已保存到 $CONFIG_FILE"
@@ -346,6 +397,13 @@ update_traffic() {
 #   set:daily|monthly|thr|cool|int|host | iface | mode | mode:xx | if:xx
 #   daemon:start|stop | cron:N | cron:report | cron:rm
 #   reset:ask | reset:yes | cancel | back:cfg | back:main
+# Master 多机:
+#   mh:list|ov|ck|rp|en
+#   mh:st|ck|rp|rd|rdy|cf|cr|ds|dx|rma|rmy|rmu:<id>
+#   mh:sd|sm|si|sthr|stag:<id>   远程配置输入
+#   mh:cn:<mins>:<id>  mh:if:<id>:<iface>
+# 会话 awaiting:
+#   m_enroll | m_daily__ID | m_monthly__ID | m_iface__ID | m_tag__ID | m_thr__ID
 #-------------------------------------------------------------------------------
 
 tg_ok() {
@@ -407,7 +465,24 @@ print(json.dumps({"inline_keyboard": rows}, ensure_ascii=False))
 }
 
 tg_kb_main() {
-  tg_kb_from_rows <<'EOF'
+  if [[ "${ROLE:-standalone}" == "master" ]]; then
+    tg_kb_from_rows <<'EOF'
+🖥 多机|mh:list
+📊 本机状态|status
+
+📡 本机报告|report
+🔍 本机检查|check
+
+⚙️ 配置|cfg
+🕐 调度|sched
+
+📋 当前配置|cfgview
+📜 日志|log
+
+ℹ️ 帮助|help
+EOF
+  else
+    tg_kb_from_rows <<'EOF'
 📊 状态|status
 📡 报告|report
 
@@ -420,12 +495,123 @@ tg_kb_main() {
 📜 日志|log
 ℹ️ 帮助|help
 EOF
+  fi
 }
 
 tg_kb_nav_main() {
   tg_kb_from_rows <<'EOF'
 🏠 主菜单|main
 EOF
+}
+
+# Master：机器列表键盘
+tg_kb_machines() {
+  local id
+  {
+    while IFS= read -r id; do
+      [[ -z "$id" ]] && continue
+      echo "🖥 ${id}|mh:st:${id}"
+    done < <(machines_each_id)
+    echo ""
+    echo "📡 全部总览|mh:ov"
+    echo "🔍 全部检查|mh:ck"
+    echo ""
+    echo "📰 汇总报告|mh:rp"
+    echo "➕ 纳管机器|mh:en"
+    echo ""
+    echo "🏠 主菜单|main"
+  } | tg_kb_from_rows
+}
+
+# Master：单机操作面板
+tg_kb_machine_ops() {
+  local id="$1"
+  tg_kb_from_rows <<EOF
+📊 状态|mh:st:${id}
+🔍 检查|mh:ck:${id}
+
+📡 报告|mh:rp:${id}
+🗑 清零今日|mh:rd:${id}
+
+⚙️ 远程配置|mh:cf:${id}
+⏱ Cron|mh:cr:${id}
+
+🟢 启守护|mh:ds:${id}
+🔴 停守护|mh:dx:${id}
+
+❌ 移出清单|mh:rma:${id}
+« 机器列表|mh:list
+EOF
+}
+
+# Master：单机远程配置
+tg_kb_machine_cfg() {
+  local id="$1"
+  tg_kb_from_rows <<EOF
+📅 日限额|mh:sd:${id}
+📆 月限额|mh:sm:${id}
+
+🖥 网卡|mh:si:${id}
+🏷 主机标识|mh:stag:${id}
+
+🚨 告警阈值|mh:sthr:${id}
+« 返回机器|mh:st:${id}
+EOF
+}
+
+# Master：单机 Cron
+tg_kb_machine_cron() {
+  local id="$1"
+  tg_kb_from_rows <<EOF
+⏱ 每 1 分|mh:cn:1:${id}
+⏱ 每 5 分|mh:cn:5:${id}
+
+⏱ 每 15 分|mh:cn:15:${id}
+🗑 移除 Cron|mh:cn:0:${id}
+
+« 返回机器|mh:st:${id}
+EOF
+}
+
+# Master：清零确认
+tg_kb_machine_reset() {
+  local id="$1"
+  tg_kb_from_rows <<EOF
+⚠️ 确认清零|mh:rdy:${id}
+取消|mh:st:${id}
+EOF
+}
+
+# Master：移出确认
+tg_kb_machine_remove() {
+  local id="$1"
+  tg_kb_from_rows <<EOF
+确认移出清单|mh:rmy:${id}
+移出并卸载|mh:rmu:${id}
+
+取消|mh:st:${id}
+EOF
+}
+
+# Master：远程网卡选择
+tg_kb_machine_ifaces() {
+  local id="$1" ifaces iface
+  ifaces=$(master_remote_tm "$id" --list-ifaces 2>/dev/null | strip_ansi | tr -d '\r' || true)
+  {
+    if [[ -n "$ifaces" ]]; then
+      while IFS= read -r iface; do
+        [[ -z "$iface" ]] && continue
+        # callback ≤64
+        echo "${iface}|mh:if:${id}:${iface}"
+      done <<<"$ifaces"
+      echo "all (全部)|mh:if:${id}:all"
+    else
+      echo "(获取失败，点此手输)|mh:sim:${id}"
+    fi
+    echo ""
+    echo "✏️ 手动输入|mh:sim:${id}"
+    echo "« 返回配置|mh:cf:${id}"
+  } | tg_kb_from_rows
 }
 
 tg_kb_cfg() {
@@ -614,14 +800,25 @@ tg_send() {
 
 tg_set_commands() {
   [[ -z "$TG_BOT_TOKEN" ]] && return 1
-  local cmds='[{"command":"start","description":"打开主菜单"},{"command":"menu","description":"打开主菜单"},{"command":"status","description":"流量状态"},{"command":"config","description":"配置中心"},{"command":"help","description":"帮助"}]'
+  local cmds
+  if [[ "${ROLE:-standalone}" == "master" ]]; then
+    cmds='[{"command":"start","description":"打开主菜单"},{"command":"menu","description":"打开主菜单"},{"command":"status","description":"本机流量状态"},{"command":"hosts","description":"多机总览与操作"},{"command":"host","description":"指定机器 /host id"},{"command":"enroll","description":"纳管新机器"},{"command":"checkall","description":"全部机器检查告警"},{"command":"config","description":"配置中心"},{"command":"help","description":"帮助"}]'
+  else
+    cmds='[{"command":"start","description":"打开主菜单"},{"command":"menu","description":"打开主菜单"},{"command":"status","description":"流量状态"},{"command":"config","description":"配置中心"},{"command":"help","description":"帮助"}]'
+  fi
   curl -sS -m 10 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/setMyCommands" \
     --data-urlencode "commands=${cmds}" >/dev/null 2>&1 || true
 }
 
 tg_ui_main_text() {
+  local role_line=""
+  if [[ "${ROLE:-standalone}" == "master" ]]; then
+    role_line=$'\n'"角色: <b>Master</b> · 纳管 <b>$(machines_count 2>/dev/null || echo 0)</b> 台 · 点「🖥 多机」管理"
+  elif [[ "${ROLE:-}" == "agent" ]]; then
+    role_line=$'\n'"角色: <b>Agent</b>（本机不轮询 TG 菜单）"
+  fi
   cat <<EOF
-📡 <b>流量监控</b> · <code>${HOSTNAME_TAG}</code>
+📡 <b>流量监控</b> · <code>${HOSTNAME_TAG}</code>${role_line}
 
 点选下方按钮操作。配置修改后立即生效。
 发送 /menu 可随时回到此菜单。
@@ -629,16 +826,23 @@ EOF
 }
 
 tg_ui_help_text() {
+  local extra=""
+  if [[ "${ROLE:-standalone}" == "master" ]]; then
+    extra=$'\n'"• Master「🖥 多机」: 总览 / 检查 / 汇总 / 纳管
+• 点机器可: 状态·检查·报告·清零·改限额/网卡·Cron·启停守护·移出
+• 命令: /hosts 总览 · /host id · /enroll · /checkall
+• CLI: <code>master enroll root@IP --tag name</code>"
+  fi
   cat <<EOF
 ℹ️ <b>使用说明</b>
 
 • 菜单为<strong>消息内按钮</strong>，不会常驻屏幕底部
 • 所有配置均可在「⚙️ 配置」中点选 / 输入完成
 • 输入过程中发 /cancel 可取消
-• 仅授权 Chat ID 可操作
+• 仅授权 Chat ID 可操作${extra}
 
 命令: /menu /status /config /help
-主机: <code>${HOSTNAME_TAG}</code>
+主机: <code>${HOSTNAME_TAG}</code> · 角色: <code>${ROLE}</code>
 EOF
 }
 
@@ -694,6 +898,7 @@ EOF
 build_config_html() {
   cat <<EOF
 ⚙️ <b>当前配置</b>
+角色: <code>${ROLE}</code> · TG轮询: <code>${TG_POLL_ENABLED}</code>
 主机标识: <code>${HOSTNAME_TAG}</code>
 监控网卡: <code>${INTERFACE}</code>
 日限额: <b>${DAILY_LIMIT_GB}</b> GB
@@ -730,11 +935,104 @@ ${hint}
   tg_show "$chat_id" "$text" "$(tg_kb_cancel_input)" "$msg_id"
 }
 
-# 应用文本配置
+# 本机/远程 文本配置应用
 tg_apply_input() {
   local chat_id="$1" field="$2" value="$3"
   value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
+  # -------- Master：远程机器对话配置 / 纳管 --------
+  if [[ "$field" == "m_enroll" ]]; then
+    tg_session_clear
+    if [[ "${ROLE:-}" != "master" && "${ROLE:-}" != "standalone" ]]; then
+      tg_api_send "❌ 仅 Master 可纳管" "$chat_id" "$(tg_kb_main)"
+      return 1
+    fi
+    local out
+    if out=$(master_enroll_from_line "$value" 2>&1); then
+      tg_api_send "✅ <b>纳管完成</b>
+<pre>$(echo "$out" | strip_ansi | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g' | tail -n 25)</pre>
+
+$(master_build_overview_html)" "$chat_id" "$(tg_kb_machines)"
+    else
+      tg_api_send "❌ <b>纳管失败</b>
+<pre>$(echo "$out" | strip_ansi | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g' | tail -n 30)</pre>
+
+格式示例:
+<code>1.2.3.4 sg-1</code>
+<code>root@1.2.3.4 --tag sg-1 --daily 100 --iface eth0</code>" "$chat_id" "$(tg_kb_machines)"
+      return 1
+    fi
+    return 0
+  fi
+
+  if [[ "$field" == m_daily__* || "$field" == m_monthly__* || "$field" == m_iface__* \
+     || "$field" == m_tag__* || "$field" == m_thr__* ]]; then
+    local kind mid key
+    kind="${field%%__*}"
+    mid="${field#*__}"
+    if [[ -z "$mid" ]] || ! machine_load "$mid" 2>/dev/null; then
+      tg_session_clear
+      tg_api_send "❌ 未知机器: <code>${mid}</code>" "$chat_id" "$(tg_kb_machines)"
+      return 1
+    fi
+    case "$kind" in
+      m_daily)
+        if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+          tg_api_send "❌ 请输入有效数字（GB）" "$chat_id" "$(tg_kb_cancel_input)"
+          return 1
+        fi
+        key="DAILY_LIMIT_GB"
+        ;;
+      m_monthly)
+        if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+          tg_api_send "❌ 请输入有效数字（GB，0=不限）" "$chat_id" "$(tg_kb_cancel_input)"
+          return 1
+        fi
+        key="MONTHLY_LIMIT_GB"
+        ;;
+      m_iface)
+        if [[ -z "$value" || ${#value} -gt 32 ]]; then
+          tg_api_send "❌ 网卡名无效" "$chat_id" "$(tg_kb_cancel_input)"
+          return 1
+        fi
+        key="INTERFACE"
+        ;;
+      m_tag)
+        if [[ -z "$value" || ${#value} -gt 64 ]]; then
+          tg_api_send "❌ 标识不能为空且 ≤64 字符" "$chat_id" "$(tg_kb_cancel_input)"
+          return 1
+        fi
+        key="HOSTNAME_TAG"
+        ;;
+      m_thr)
+        value="$(echo "$value" | tr -d ' ')"
+        if ! [[ "$value" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+          tg_api_send "❌ 格式: 50,80,90,95,100" "$chat_id" "$(tg_kb_cancel_input)"
+          return 1
+        fi
+        key="ALERT_THRESHOLDS"
+        ;;
+      *)
+        tg_session_clear
+        tg_api_send "❌ 未知远程配置项" "$chat_id" "$(tg_kb_machines)"
+        return 1
+        ;;
+    esac
+    tg_session_clear
+    if master_remote_set_config "$mid" "$key" "$value"; then
+      tg_api_send "✅ 已更新 <b>${mid}</b>
+<code>${key}=${value}</code>
+
+$(master_build_host_html "$mid")" "$chat_id" "$(tg_kb_machine_ops "$mid")"
+    else
+      tg_api_send "❌ 远程更新失败: <b>${mid}</b>
+<code>${key}=${value}</code>" "$chat_id" "$(tg_kb_machine_ops "$mid")"
+      return 1
+    fi
+    return 0
+  fi
+
+  # -------- 本机配置 --------
   case "$field" in
     daily)
       if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -1059,6 +1357,221 @@ PID: $(cat "$PID_FILE" 2>/dev/null || echo -)" "$(tg_kb_sched)" "$msg_id"
         tg_answer_cb "$cb_id" "无效"
       fi
       ;;
+    # -------- Master 多机 --------
+    mh:list)
+      tg_answer_cb "$cb_id"
+      tg_show "$chat_id" "🖥 <b>多机管理</b>
+Master: <code>${HOSTNAME_TAG}</code>
+已纳管: <b>$(machines_count)</b> 台
+
+点选机器操作；可总览/检查/汇总/纳管。" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:ov)
+      tg_answer_cb "$cb_id" "汇总中…"
+      tg_show "$chat_id" "$(master_build_overview_html)" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:ck)
+      tg_answer_cb "$cb_id" "检查全部…"
+      master_cmd_check >/dev/null 2>&1 || true
+      tg_show "$chat_id" "🔍 <b>全部检查已触发</b>
+
+$(master_build_overview_html)" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:rp)
+      tg_answer_cb "$cb_id" "生成汇总…"
+      TG_ENABLED="true"
+      master_cmd_report >/dev/null 2>&1 || true
+      tg_show "$chat_id" "$(master_build_overview_html)" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:en)
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_enroll" "➕ <b>纳管新机器</b>
+
+请发送一行，支持:
+
+<code>1.2.3.4</code>
+<code>1.2.3.4 sg-1</code>
+<code>root@1.2.3.4 --tag sg-1 --daily 100 --iface eth0</code>
+
+需 Master 已能 <code>ssh root@目标</code> 免密。
+/cancel 取消" "$msg_id"
+      ;;
+    # 更长前缀必须写在 mh:st:* / mh:rd:* / mh:rm* 之前
+    mh:stag:*)
+      local mid="${data#mh:stag:}"
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_tag__${mid}" "当前机器: <b>${mid}</b>
+请发送新的 <b>HOSTNAME_TAG</b>（告警标题用）" "$msg_id"
+      ;;
+    mh:sthr:*)
+      local mid="${data#mh:sthr:}"
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_thr__${mid}" "当前机器: <b>${mid}</b>
+请发送告警阈值，例如 <code>50,80,90,95,100</code>" "$msg_id"
+      ;;
+    mh:st:*)
+      local mid="${data#mh:st:}"
+      tg_answer_cb "$cb_id" "查询 ${mid}…"
+      tg_show "$chat_id" "$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      ;;
+    mh:ck:*)
+      local mid="${data#mh:ck:}"
+      tg_answer_cb "$cb_id" "检查 ${mid}…"
+      master_remote_tm "$mid" --check >/dev/null 2>&1 || true
+      tg_show "$chat_id" "🔍 <b>${mid}</b> 检查完成
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      ;;
+    mh:rp:*)
+      local mid="${data#mh:rp:}"
+      tg_answer_cb "$cb_id" "报告 ${mid}…"
+      master_remote_tm "$mid" --report >/dev/null 2>&1 || true
+      tg_show "$chat_id" "📡 已触发 <b>${mid}</b> 远程报告
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      ;;
+    mh:rdy:*)
+      local mid="${data#mh:rdy:}"
+      tg_answer_cb "$cb_id" "清零中…"
+      if master_remote_tm "$mid" --reset-day >/dev/null 2>&1; then
+        tg_show "$chat_id" "✅ <b>${mid}</b> 今日累计已清零
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      else
+        tg_show "$chat_id" "❌ <b>${mid}</b> 清零失败" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      fi
+      ;;
+    mh:rd:*)
+      local mid="${data#mh:rd:}"
+      tg_answer_cb "$cb_id"
+      tg_show "$chat_id" "🗑 <b>清零 ${mid} 今日累计？</b>
+
+将清空远程今日流量与当日告警冷却。" "$(tg_kb_machine_reset "$mid")" "$msg_id"
+      ;;
+    mh:cf:*)
+      local mid="${data#mh:cf:}"
+      tg_answer_cb "$cb_id"
+      tg_show "$chat_id" "⚙️ <b>远程配置 · ${mid}</b>
+
+修改将写入 Agent 的 config.conf（立即生效）。" "$(tg_kb_machine_cfg "$mid")" "$msg_id"
+      ;;
+    mh:cr:*)
+      local mid="${data#mh:cr:}"
+      tg_answer_cb "$cb_id"
+      tg_show "$chat_id" "⏱ <b>远程 Cron · ${mid}</b>
+
+安装 Agent 定时 --check。" "$(tg_kb_machine_cron "$mid")" "$msg_id"
+      ;;
+    mh:ds:*)
+      local mid="${data#mh:ds:}"
+      tg_answer_cb "$cb_id" "启动守护…"
+      if master_remote_tm "$mid" --start >/dev/null 2>&1; then
+        tg_show "$chat_id" "✅ <b>${mid}</b> 已请求启动守护
+（Agent 默认 TG_POLL=false，守护只做检查）
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      else
+        tg_show "$chat_id" "❌ <b>${mid}</b> 启动守护失败" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      fi
+      ;;
+    mh:dx:*)
+      local mid="${data#mh:dx:}"
+      tg_answer_cb "$cb_id" "停止守护…"
+      if master_remote_tm "$mid" --stop >/dev/null 2>&1; then
+        tg_show "$chat_id" "✅ <b>${mid}</b> 已请求停止守护
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      else
+        tg_show "$chat_id" "❌ <b>${mid}</b> 停止守护失败" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      fi
+      ;;
+    mh:rmu:*)
+      local mid="${data#mh:rmu:}"
+      tg_answer_cb "$cb_id" "卸载中…"
+      master_cmd_remove "$mid" --uninstall >/dev/null 2>&1 || true
+      tg_show "$chat_id" "✅ 已移出并尝试卸载 <b>${mid}</b>
+
+$(master_build_overview_html)" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:rmy:*)
+      local mid="${data#mh:rmy:}"
+      tg_answer_cb "$cb_id" "移出中…"
+      master_cmd_remove "$mid" >/dev/null 2>&1 || true
+      tg_show "$chat_id" "✅ 已从清单移出 <b>${mid}</b>
+
+$(master_build_overview_html)" "$(tg_kb_machines)" "$msg_id"
+      ;;
+    mh:rma:*)
+      local mid="${data#mh:rma:}"
+      tg_answer_cb "$cb_id"
+      tg_show "$chat_id" "❌ <b>移出 ${mid}</b>
+
+• 确认移出：仅从 Master 清单删除
+• 移出并卸载：再删远程目录并清 cron" "$(tg_kb_machine_remove "$mid")" "$msg_id"
+      ;;
+    mh:sd:*)
+      local mid="${data#mh:sd:}"
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_daily__${mid}" "当前机器: <b>${mid}</b>
+请发送新的 <b>日限额 GB</b>，例如 <code>100</code>" "$msg_id"
+      ;;
+    mh:sm:*)
+      local mid="${data#mh:sm:}"
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_monthly__${mid}" "当前机器: <b>${mid}</b>
+请发送新的 <b>月限额 GB</b>（0=不限）" "$msg_id"
+      ;;
+    mh:sim:*)
+      local mid="${data#mh:sim:}"
+      tg_answer_cb "$cb_id"
+      tg_prompt_input "$chat_id" "m_iface__${mid}" "当前机器: <b>${mid}</b>
+请发送网卡名，例如 <code>eth0</code> / <code>ens3</code> / <code>all</code>" "$msg_id"
+      ;;
+    mh:si:*)
+      local mid="${data#mh:si:}"
+      tg_answer_cb "$cb_id" "读取网卡…"
+      tg_show "$chat_id" "🖥 <b>选择 ${mid} 网卡</b>
+点选网卡，或点「手动输入」。" "$(tg_kb_machine_ifaces "$mid")" "$msg_id"
+      ;;
+    mh:cn:*)
+      # mh:cn:<mins>:<id>
+      local rest mins mid
+      rest="${data#mh:cn:}"
+      mins="${rest%%:*}"
+      mid="${rest#*:}"
+      if [[ "$mins" == "0" ]]; then
+        tg_answer_cb "$cb_id" "移除 Cron…"
+        if master_remote_tm "$mid" --remove-cron >/dev/null 2>&1; then
+          tg_show "$chat_id" "✅ <b>${mid}</b> 已移除 Cron" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+        else
+          tg_show "$chat_id" "❌ <b>${mid}</b> 移除 Cron 失败" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+        fi
+      elif [[ "$mins" =~ ^[0-9]+$ ]]; then
+        tg_answer_cb "$cb_id" "Cron ${mins}m…"
+        if master_remote_tm "$mid" --install-cron "$mins" >/dev/null 2>&1; then
+          tg_show "$chat_id" "✅ <b>${mid}</b> Cron 每 ${mins} 分钟" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+        else
+          tg_show "$chat_id" "❌ <b>${mid}</b> 安装 Cron 失败" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+        fi
+      else
+        tg_answer_cb "$cb_id" "无效"
+      fi
+      ;;
+    mh:if:*)
+      # mh:if:<id>:<iface>
+      local rest mid iface
+      rest="${data#mh:if:}"
+      mid="${rest%%:*}"
+      iface="${rest#*:}"
+      tg_answer_cb "$cb_id" "设置网卡…"
+      if master_remote_set_config "$mid" "INTERFACE" "$iface"; then
+        tg_show "$chat_id" "✅ <b>${mid}</b> 网卡 → <code>${iface}</code>
+
+$(master_build_host_html "$mid")" "$(tg_kb_machine_ops "$mid")" "$msg_id"
+      else
+        tg_show "$chat_id" "❌ 设置网卡失败" "$(tg_kb_machine_cfg "$mid")" "$msg_id"
+      fi
+      ;;
     *)
       tg_answer_cb "$cb_id" "未知操作"
       tg_show "$chat_id" "$(tg_ui_main_text)" "$(tg_kb_main)" "$msg_id"
@@ -1125,6 +1638,52 @@ $(build_config_html)" "$chat_id" "$(tg_kb_cfg)"
       ;;
     /status)
       tg_api_send "$(build_status_html)" "$chat_id" "$(tg_kb_nav_main)"
+      ;;
+    /hosts|/fleet|/machines)
+      if [[ "${ROLE:-standalone}" == "master" ]]; then
+        tg_api_send "$(master_build_overview_html)" "$chat_id" "$(tg_kb_machines)"
+      else
+        tg_api_send "当前角色不是 master。单机请用 /status" "$chat_id" "$(tg_kb_main)"
+      fi
+      ;;
+    /enroll|/addhost)
+      if [[ "${ROLE:-standalone}" != "master" ]]; then
+        # 允许 standalone 首次纳管时自动升 master
+        :
+      fi
+      tg_prompt_input "$chat_id" "m_enroll" "➕ <b>纳管新机器</b>
+
+请发送一行:
+<code>1.2.3.4 sg-1</code>
+或 <code>root@1.2.3.4 --tag sg-1 --daily 100</code>"
+      ;;
+    /host|/node)
+      if [[ "${ROLE:-standalone}" != "master" ]]; then
+        tg_api_send "仅 Master 支持。请用 /status 看本机" "$chat_id" "$(tg_kb_main)"
+        return 0
+      fi
+      local hid="${text#* }"
+      hid="$(echo "$hid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      if [[ -z "$hid" || "$hid" == "/host" || "$hid" == "/node" ]]; then
+        tg_api_send "用法: <code>/host sg-1</code>
+
+$(master_build_overview_html)" "$chat_id" "$(tg_kb_machines)"
+      else
+        tg_api_send "$(master_build_host_html "$hid")" "$chat_id" "$(tg_kb_machine_ops "$hid")"
+      fi
+      ;;
+    /checkall)
+      if [[ "${ROLE:-standalone}" != "master" ]]; then
+        check_and_alert || true
+        tg_api_send "🔍 本机检查完成
+
+$(build_status_html)" "$chat_id" "$(tg_kb_nav_main)"
+      else
+        master_cmd_check >/dev/null 2>&1 || true
+        tg_api_send "🔍 <b>全部检查已触发</b>
+
+$(master_build_overview_html)" "$chat_id" "$(tg_kb_machines)"
+      fi
       ;;
     /report)
       TG_ENABLED="true"
@@ -1526,8 +2085,654 @@ show_status() {
   else
     echo "  定时任务: $(c_yellow "未安装")"
   fi
+  echo "  角色:     ${ROLE}"
+  echo "  TG轮询:   ${TG_POLL_ENABLED}"
   echo "$(c_bold "══════════════════════════════════════")"
   echo ""
+}
+
+# 单行机器可读状态（Master 汇总 / 远程采集）
+# 格式: tag|iface|mode|day_gb|limit_gb|pct|rx|tx|month_gb
+status_brief() {
+  update_traffic
+  load_state
+  local day_used day_limit_b day_p day_gb month_gb
+  day_used=$(mode_bytes "$day_rx" "$day_tx")
+  day_limit_b=$(gb_to_bytes "$DAILY_LIMIT_GB")
+  day_p=$(pct "$day_used" "$day_limit_b")
+  day_gb=$(bytes_to_gb "$day_used")
+  month_gb=$(bytes_to_gb "$(mode_bytes "$month_rx" "$month_tx")")
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "${HOSTNAME_TAG}" "${INTERFACE}" "${COUNT_MODE}" \
+    "${day_gb}" "${DAILY_LIMIT_GB}" "${day_p}" \
+    "$(fmt_bytes "$day_rx")" "$(fmt_bytes "$day_tx")" "${month_gb}"
+}
+
+# 去掉 ANSI 颜色
+strip_ansi() {
+  sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g'
+}
+
+#-------------------------------------------------------------------------------
+# Master · 多机纳管（SSH）
+# machines.conf 每行:
+#   id|ssh_target|tag|iface|daily_gb|monthly_gb|enabled|enrolled_at|install_dir
+#-------------------------------------------------------------------------------
+machines_ensure() {
+  ensure_dirs
+  if [[ ! -f "$MACHINES_FILE" ]]; then
+    cat > "$MACHINES_FILE" <<'EOF'
+# traffic-monitor 纳管清单（Master）
+# id|ssh_target|tag|iface|daily_gb|monthly_gb|enabled|enrolled_at|install_dir
+EOF
+    chmod 600 "$MACHINES_FILE"
+  fi
+}
+
+# 加载机器到全局 M_ID M_SSH M_TAG M_IFACE M_DAILY M_MONTHLY M_ENABLED M_AT M_DIR
+machine_load() {
+  local want="$1" line id
+  machines_ensure
+  M_ID=""; M_SSH=""; M_TAG=""; M_IFACE=""; M_DAILY=""; M_MONTHLY=""
+  M_ENABLED=""; M_AT=""; M_DIR=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    id="${line%%|*}"
+    [[ "$id" != "$want" ]] && continue
+    IFS='|' read -r M_ID M_SSH M_TAG M_IFACE M_DAILY M_MONTHLY M_ENABLED M_AT M_DIR <<<"$line"
+    M_DIR="${M_DIR:-$REMOTE_INSTALL_DIR}"
+    M_ENABLED="${M_ENABLED:-true}"
+    return 0
+  done < "$MACHINES_FILE"
+  return 1
+}
+
+machine_exists() {
+  machine_load "$1" 2>/dev/null
+}
+
+# 列举启用机器 id（空格分隔到 stdout 每行一个）
+machines_each_id() {
+  local line id enabled
+  machines_ensure
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    id="${line%%|*}"
+    enabled=$(echo "$line" | awk -F'|' '{print $7}')
+    [[ "${enabled:-true}" == "false" ]] && continue
+    echo "$id"
+  done < "$MACHINES_FILE"
+}
+
+machines_count() {
+  machines_each_id | wc -l | tr -d ' '
+}
+
+machine_upsert() {
+  local id="$1" ssh_t="$2" tag="$3" iface="$4" daily="$5" monthly="$6"
+  local enabled="${7:-true}" at="${8:-}" dir="${9:-$REMOTE_INSTALL_DIR}"
+  local line tmp
+  [[ -z "$at" ]] && at="$(date '+%Y-%m-%dT%H:%M:%S')"
+  line="${id}|${ssh_t}|${tag}|${iface}|${daily}|${monthly}|${enabled}|${at}|${dir}"
+  machines_ensure
+  tmp=$(mktemp)
+  awk -F'|' -v id="$id" '
+    /^[[:space:]]*#/ || NF==0 { print; next }
+    $1==id { next }
+    { print }
+  ' "$MACHINES_FILE" > "$tmp"
+  echo "$line" >> "$tmp"
+  mv "$tmp" "$MACHINES_FILE"
+  chmod 600 "$MACHINES_FILE"
+}
+
+machine_remove() {
+  local id="$1" tmp
+  machines_ensure
+  tmp=$(mktemp)
+  awk -F'|' -v id="$id" '
+    /^[[:space:]]*#/ || NF==0 { print; next }
+    $1==id { next }
+    { print }
+  ' "$MACHINES_FILE" > "$tmp"
+  mv "$tmp" "$MACHINES_FILE"
+  chmod 600 "$MACHINES_FILE"
+}
+
+# shellcheck disable=SC2086
+master_ssh() {
+  local target="$1"; shift
+  ssh $SSH_OPTS "$target" "$@"
+}
+
+# shellcheck disable=SC2086
+master_scp() {
+  local src="$1" dest="$2"
+  scp $SSH_OPTS "$src" "$dest"
+}
+
+master_promote() {
+  if [[ "$ROLE" != "master" ]]; then
+    ROLE="master"
+    TG_POLL_ENABLED="true"
+    save_config
+    echo "$(c_green "✓") 本机角色已设为 master（TG 轮询开启）"
+  fi
+}
+
+normalize_ssh_target() {
+  local t="$1"
+  if [[ "$t" != *@* ]]; then
+    t="root@${t}"
+  fi
+  echo "$t"
+}
+
+# 在机器 id 上执行 traffic-monitor 子命令
+master_remote_tm() {
+  local id="$1"; shift
+  if ! machine_load "$id"; then
+    echo "$(c_red "✗") 未知机器: $id" >&2
+    return 1
+  fi
+  local bin="${M_DIR}/traffic-monitor.sh"
+  local remote_cmd
+  remote_cmd=$(printf '%q ' bash "$bin" "$@")
+  # shellcheck disable=SC2029
+  master_ssh "$M_SSH" "$remote_cmd"
+}
+
+# 本机写入单项配置（供 CLI / 远程 --set-config）
+apply_set_config() {
+  local key="$1" value="$2"
+  case "$key" in
+    INTERFACE) INTERFACE="$value" ;;
+    DAILY_LIMIT_GB) DAILY_LIMIT_GB="$value" ;;
+    MONTHLY_LIMIT_GB) MONTHLY_LIMIT_GB="$value" ;;
+    COUNT_MODE) COUNT_MODE="$value" ;;
+    ALERT_THRESHOLDS) ALERT_THRESHOLDS="$value" ;;
+    ALERT_COOLDOWN_MIN) ALERT_COOLDOWN_MIN="$value" ;;
+    CHECK_INTERVAL_SEC) CHECK_INTERVAL_SEC="$value" ;;
+    HOSTNAME_TAG) HOSTNAME_TAG="$value" ;;
+    TG_ENABLED) TG_ENABLED="$value" ;;
+    TG_POLL_ENABLED) TG_POLL_ENABLED="$value" ;;
+    *)
+      echo "不支持的配置键: $key" >&2
+      return 1
+      ;;
+  esac
+  save_config
+  load_config
+  echo "OK ${key}=${value}"
+}
+
+# 远程改配置，并同步 machines.conf 关键字段
+master_remote_set_config() {
+  local id="$1" key="$2" value="$3"
+  master_remote_tm "$id" --set-config "$key" "$value" >/dev/null || return 1
+  if machine_load "$id"; then
+    case "$key" in
+      DAILY_LIMIT_GB) M_DAILY="$value" ;;
+      MONTHLY_LIMIT_GB) M_MONTHLY="$value" ;;
+      INTERFACE) M_IFACE="$value" ;;
+      HOSTNAME_TAG) M_TAG="$value" ;;
+    esac
+    machine_upsert "$M_ID" "$M_SSH" "$M_TAG" "$M_IFACE" "$M_DAILY" "$M_MONTHLY" \
+      "${M_ENABLED:-true}" "${M_AT:-}" "${M_DIR}"
+  fi
+  return 0
+}
+
+# TG / 对话纳管：解析一行文本为 enroll 参数
+master_enroll_from_line() {
+  local line="$1"
+  local -a raw args
+  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -n "$line" ]] || { echo "空输入" >&2; return 1; }
+  # shellcheck disable=SC2206
+  raw=($line)
+  if ((${#raw[@]} == 2)) && [[ "${raw[1]}" != --* ]]; then
+    args=("${raw[0]}" --tag "${raw[1]}")
+  else
+    args=("${raw[@]}")
+  fi
+  master_cmd_enroll "${args[@]}"
+}
+
+master_ssh_ok() {
+  local target="$1"
+  master_ssh "$target" "true" 2>/dev/null
+}
+
+master_cmd_list() {
+  machines_ensure
+  local line id ssh_t tag iface daily monthly enabled at dir n
+  n=0
+  echo ""
+  echo "$(c_bold "════════ 已纳管机器 ════════")"
+  printf "  %-12s %-22s %-10s %-8s %s\n" "ID" "SSH" "TAG" "IFACE" "DAILY"
+  echo "  ------------------------------------------------------------"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    IFS='|' read -r id ssh_t tag iface daily monthly enabled at dir <<<"$line"
+    [[ "${enabled:-true}" == "false" ]] && continue
+    printf "  %-12s %-22s %-10s %-8s %sG\n" "$id" "$ssh_t" "$tag" "$iface" "$daily"
+    n=$((n + 1))
+  done < "$MACHINES_FILE"
+  if (( n == 0 )); then
+    echo "  (空) 使用: traffic-monitor master enroll root@IP --tag name"
+  fi
+  echo "  ------------------------------------------------------------"
+  echo "  清单文件: $MACHINES_FILE"
+  echo ""
+}
+
+master_cmd_enroll() {
+  local target="" tag="" id="" iface="" daily="" monthly="" mode="" cron_min="5"
+  local rdir="" force="false" copy_tg="true"
+  local positional=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tag) tag="${2:-}"; shift 2 ;;
+      --id) id="${2:-}"; shift 2 ;;
+      --iface|--interface) iface="${2:-}"; shift 2 ;;
+      --daily) daily="${2:-}"; shift 2 ;;
+      --monthly) monthly="${2:-}"; shift 2 ;;
+      --mode) mode="${2:-}"; shift 2 ;;
+      --cron) cron_min="${2:-}"; shift 2 ;;
+      --dir) rdir="${2:-}"; shift 2 ;;
+      --force) force="true"; shift ;;
+      --no-tg) copy_tg="false"; shift ;;
+      -h|--help)
+        cat <<'EOF'
+用法: traffic-monitor master enroll <root@host|IP> [选项]
+
+选项:
+  --tag NAME       主机标识（默认取远程 hostname -s）
+  --id ID          清单 ID（默认与 tag 相同）
+  --iface IFACE    监控网卡（默认 eth0）
+  --daily N        日限额 GB（默认沿用本机配置）
+  --monthly N      月限额 GB（默认 0）
+  --mode MODE      total|rx|tx（默认 total）
+  --cron N         远程 crontab 间隔分钟（默认 5；0=不装 cron）
+  --dir PATH       远程安装目录（默认 /opt/traffic-monitor）
+  --force          已存在时覆盖
+  --no-tg          不把本机 TG 配置复制到 Agent（Agent 将不本地告警）
+
+前提: 本机可 SSH 免密登录 root@目标（BatchMode）。
+EOF
+        return 0
+        ;;
+      --*)
+        echo "$(c_red "✗") 未知选项: $1" >&2
+        return 1
+        ;;
+      *)
+        positional+=("$1"); shift ;;
+    esac
+  done
+
+  if ((${#positional[@]} < 1)); then
+    echo "$(c_red "✗") 请指定目标: root@IP 或 IP" >&2
+    return 1
+  fi
+  target="$(normalize_ssh_target "${positional[0]}")"
+  iface="${iface:-eth0}"
+  daily="${daily:-$DAILY_LIMIT_GB}"
+  monthly="${monthly:-${MONTHLY_LIMIT_GB:-0}}"
+  mode="${mode:-$COUNT_MODE}"
+  rdir="${rdir:-$REMOTE_INSTALL_DIR}"
+
+  master_promote
+  machines_ensure
+
+  echo ""
+  echo "$(c_bold "—— 纳管 Agent ——")"
+  echo "  目标: $target"
+  echo "  检测 SSH …"
+  if ! master_ssh_ok "$target"; then
+    echo "$(c_red "✗") SSH 失败。请先配置 root 密钥免密，例如:"
+    echo "    ssh-copy-id $target"
+    echo "  当前 SSH_OPTS=$SSH_OPTS"
+    return 1
+  fi
+  echo "$(c_green "✓") SSH 正常"
+
+  if [[ -z "$tag" ]]; then
+    tag="$(master_ssh "$target" "hostname -s 2>/dev/null || hostname" | tr -d '\r' | tail -1)"
+    tag="${tag:-agent}"
+  fi
+  id="${id:-$tag}"
+  # id 仅允许安全字符（TG callback / 文件友好）
+  if ! [[ "$id" =~ ^[A-Za-z0-9._@-]{1,32}$ ]]; then
+    echo "$(c_red "✗") id/tag 仅允许字母数字 . _ - @ 且 ≤32 字符: $id" >&2
+    return 1
+  fi
+
+  if machine_exists "$id" && [[ "$force" != "true" ]]; then
+    echo "$(c_red "✗") 机器 id 已存在: $id （使用 --force 覆盖）" >&2
+    return 1
+  fi
+
+  echo "  安装目录: $rdir"
+  echo "  标识/ID:  $tag / $id"
+  echo "  网卡/限额: $iface  日 ${daily}G  月 ${monthly}G  模式 $mode"
+
+  # 远程依赖
+  echo "  安装依赖 …"
+  master_ssh "$target" "bash -s" <<'REMOTE_DEPS'
+set -euo pipefail
+need() { command -v "$1" >/dev/null 2>&1; }
+if need curl && need python3; then
+  exit 0
+fi
+export DEBIAN_FRONTEND=noninteractive
+if need apt-get; then
+  apt-get update -qq
+  apt-get install -y -qq curl python3 ca-certificates openssh-client
+elif need dnf; then
+  dnf install -y curl python3 ca-certificates
+elif need yum; then
+  yum install -y curl python3 ca-certificates
+elif need apk; then
+  apk add --no-cache curl python3 ca-certificates
+else
+  echo "无法自动安装 curl/python3" >&2
+  exit 1
+fi
+REMOTE_DEPS
+
+  echo "  同步脚本 …"
+  master_ssh "$target" "mkdir -p '$rdir/state'"
+  master_scp "$SCRIPT_PATH" "${target}:${rdir}/traffic-monitor.sh"
+  if [[ -f "${SCRIPT_DIR}/config.conf.example" ]]; then
+    master_scp "${SCRIPT_DIR}/config.conf.example" "${target}:${rdir}/config.conf.example" || true
+  fi
+  master_ssh "$target" "chmod +x '${rdir}/traffic-monitor.sh'; ln -sfn '${rdir}/traffic-monitor.sh' /usr/local/bin/traffic-monitor"
+
+  local tg_en="false" tg_token="" tg_chat=""
+  if [[ "$copy_tg" == "true" && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_ID" ]]; then
+    tg_en="true"
+    tg_token="$TG_BOT_TOKEN"
+    tg_chat="$TG_CHAT_ID"
+  fi
+
+  echo "  写入 Agent 配置 …"
+  # 通过 base64 下发，避免特殊字符破坏远程 shell
+  local conf_body conf_b64
+  conf_body=$(cat <<EOF
+# Agent 配置 - 由 master enroll 生成，请勿手改 ROLE/TG_POLL 除非清楚含义
+ROLE="agent"
+INTERFACE="$(cfg_escape "$iface")"
+DAILY_LIMIT_GB="$(cfg_escape "$daily")"
+MONTHLY_LIMIT_GB="$(cfg_escape "$monthly")"
+CHECK_INTERVAL_SEC="$(cfg_escape "${CHECK_INTERVAL_SEC}")"
+TG_BOT_TOKEN="$(cfg_escape "$tg_token")"
+TG_CHAT_ID="$(cfg_escape "$tg_chat")"
+TG_ENABLED="$(cfg_escape "$tg_en")"
+TG_POLL_ENABLED="false"
+ALERT_THRESHOLDS="$(cfg_escape "${ALERT_THRESHOLDS}")"
+ALERT_COOLDOWN_MIN="$(cfg_escape "${ALERT_COOLDOWN_MIN}")"
+COUNT_MODE="$(cfg_escape "$mode")"
+EXCLUDE_LO="$(cfg_escape "${EXCLUDE_LO}")"
+LOG_MAX_LINES="$(cfg_escape "${LOG_MAX_LINES}")"
+TIMEZONE="$(cfg_escape "${TIMEZONE}")"
+HOSTNAME_TAG="$(cfg_escape "$tag")"
+SSH_OPTS="$(cfg_escape "${SSH_OPTS}")"
+REMOTE_INSTALL_DIR="$(cfg_escape "$rdir")"
+EOF
+)
+  conf_b64=$(printf '%s' "$conf_body" | base64 | tr -d '\n')
+  master_ssh "$target" "echo '${conf_b64}' | base64 -d > '${rdir}/config.conf' && chmod 600 '${rdir}/config.conf'"
+
+  # 初始化状态
+  master_ssh "$target" "bash '${rdir}/traffic-monitor.sh' --status >/dev/null 2>&1 || true"
+
+  if [[ "$cron_min" != "0" ]]; then
+    echo "  安装远程 cron 每 ${cron_min} 分钟 …"
+    master_ssh "$target" "bash '${rdir}/traffic-monitor.sh' --install-cron '${cron_min}'"
+  fi
+
+  machine_upsert "$id" "$target" "$tag" "$iface" "$daily" "$monthly" "true" "" "$rdir"
+  log INFO "enroll ok id=$id target=$target tag=$tag"
+  echo ""
+  echo "$(c_green "✓") 已纳管: $id ($target)"
+  echo "  远程状态: traffic-monitor master status $id"
+  echo "  全部总览: traffic-monitor master status"
+  echo "  Agent 本地告警: TG_ENABLED=$tg_en  TG_POLL=false（仅 Master 轮询菜单）"
+  echo ""
+}
+
+master_cmd_status() {
+  local filter="${1:-}"
+  local id brief
+  if [[ -n "$filter" ]]; then
+    if ! machine_load "$filter"; then
+      echo "$(c_red "✗") 未知机器: $filter" >&2
+      return 1
+    fi
+    echo ""
+    echo "$(c_bold "—— 远程状态: ${M_ID} (${M_SSH}) ——")"
+    if ! master_remote_tm "$filter" --status 2>&1 | strip_ansi; then
+      echo "$(c_red "✗") 连接或执行失败"
+      return 1
+    fi
+    return 0
+  fi
+
+  echo ""
+  echo "$(c_bold "════════ 多机流量总览 ════════")"
+  printf "  %-12s %-8s %10s %8s %8s  %s\n" "ID" "IFACE" "DAY" "LIMIT" "PCT" "RX/TX"
+  echo "  ------------------------------------------------------------------"
+  local any=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    any=1
+    if ! machine_load "$id"; then
+      continue
+    fi
+    if brief=$(master_remote_tm "$id" --status-brief 2>/dev/null | strip_ansi | tail -1); then
+      # tag|iface|mode|day_gb|limit|pct|rx|tx|month
+      IFS='|' read -r _ iface _ day_gb limit pct rx tx _ <<<"$brief"
+      printf "  %-12s %-8s %8sG %7sG %7s%%  %s / %s\n" \
+        "$id" "${iface:-?}" "${day_gb:-?}" "${limit:-?}" "${pct:-?}" "${rx:-?}" "${tx:-?}"
+    else
+      printf "  %-12s %s\n" "$id" "$(c_red "SSH/执行失败")"
+    fi
+  done < <(machines_each_id)
+  if (( any == 0 )); then
+    echo "  (无已纳管机器)"
+  fi
+  echo "  ------------------------------------------------------------------"
+  echo ""
+}
+
+master_cmd_check() {
+  local filter="${1:-}" id
+  if [[ -n "$filter" ]]; then
+    echo "检查 $filter …"
+    master_remote_tm "$filter" --check
+    return $?
+  fi
+  local ok=0 fail=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    echo "—— check $id ——"
+    if master_remote_tm "$id" --check; then
+      ok=$((ok + 1))
+    else
+      fail=$((fail + 1))
+      echo "$(c_red "✗") $id 失败"
+    fi
+  done < <(machines_each_id)
+  echo "$(c_green "✓") 完成: 成功 $ok  失败 $fail"
+  (( fail == 0 ))
+}
+
+master_cmd_report() {
+  local filter="${1:-}" id brief msg lines
+  lines=""
+  if [[ -n "$filter" ]]; then
+    if ! machine_load "$filter"; then
+      echo "$(c_red "✗") 未知机器: $filter" >&2
+      return 1
+    fi
+    # 远程推送报告（使用 Agent 自己的 TG）
+    master_remote_tm "$filter" --report
+    return $?
+  fi
+
+  # 汇总一条推到 Master TG
+  lines="📡 <b>多机流量汇总</b>
+Master: <code>${HOSTNAME_TAG}</code>
+时间: $(date '+%Y-%m-%d %H:%M:%S')
+"
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    if brief=$(master_remote_tm "$id" --status-brief 2>/dev/null | strip_ansi | tail -1); then
+      IFS='|' read -r tag iface mode day_gb limit pct rx tx month_gb <<<"$brief"
+      lines+="
+• <b>${id}</b> <code>${iface}</code>
+  日: <b>${day_gb}</b>/${limit} GB (<b>${pct}%</b>) 月: ${month_gb} GB
+  RX ${rx} · TX ${tx}"
+    else
+      lines+="
+• <b>${id}</b> ❌ 不可达"
+    fi
+  done < <(machines_each_id)
+
+  if [[ "$TG_ENABLED" == "true" ]]; then
+    tg_send "$lines" "HTML" "true" || true
+    echo "$(c_green "✓") 汇总报告已推送 Telegram"
+  else
+    echo "$lines" | strip_ansi
+    echo "$(c_yellow "!") TG 未启用，已打印到终端"
+  fi
+}
+
+master_cmd_exec() {
+  local id="${1:-}"
+  shift || true
+  if [[ -z "$id" || $# -lt 1 ]]; then
+    echo "用法: traffic-monitor master exec <id> --status|--check|--report|..." >&2
+    return 1
+  fi
+  # 允许用户写 --status 或 status
+  local args=("$@")
+  if [[ "${args[0]}" != --* ]]; then
+    args[0]="--${args[0]}"
+  fi
+  master_remote_tm "$id" "${args[@]}"
+}
+
+master_cmd_remove() {
+  local id="${1:-}" uninstall="${2:-}"
+  if [[ -z "$id" ]]; then
+    echo "用法: traffic-monitor master remove <id> [--uninstall]" >&2
+    return 1
+  fi
+  if ! machine_load "$id"; then
+    echo "$(c_red "✗") 未知机器: $id" >&2
+    return 1
+  fi
+  if [[ "$uninstall" == "--uninstall" ]]; then
+    echo "远程移除 cron 并删除 ${M_DIR} …"
+    master_ssh "$M_SSH" "bash '${M_DIR}/traffic-monitor.sh' --remove-cron 2>/dev/null || true; bash '${M_DIR}/traffic-monitor.sh' --stop 2>/dev/null || true; rm -rf '${M_DIR}'" || true
+  fi
+  machine_remove "$id"
+  echo "$(c_green "✓") 已从清单移除: $id"
+}
+
+# Master 总览 HTML（TG）
+master_build_overview_html() {
+  local id brief tag iface mode day_gb limit pct rx tx month_gb body n
+  body="🖥 <b>多机流量总览</b>
+Master: <code>${HOSTNAME_TAG}</code>
+"
+  n=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    n=$((n + 1))
+    if brief=$(master_remote_tm "$id" --status-brief 2>/dev/null | strip_ansi | tail -1); then
+      IFS='|' read -r tag iface mode day_gb limit pct rx tx month_gb <<<"$brief"
+      body+="
+• <b>${id}</b> <code>${iface:-?}</code> 日 <b>${day_gb:-?}</b>/${limit:-?}G (<b>${pct:-?}%</b>)"
+    else
+      body+="
+• <b>${id}</b> ❌"
+    fi
+  done < <(machines_each_id)
+  if (( n == 0 )); then
+    body+=$'\n\n'"暂无纳管机器。在 Master 执行:
+<code>traffic-monitor master enroll root@IP --tag name</code>"
+  fi
+  body+=$'\n\n'"更新: $(date '+%Y-%m-%d %H:%M:%S')"
+  printf '%s' "$body"
+}
+
+master_build_host_html() {
+  local id="$1" brief tag iface mode day_gb limit pct rx tx month_gb
+  if ! machine_load "$id"; then
+    echo "❌ 未知机器 <code>${id}</code>"
+    return 1
+  fi
+  if ! brief=$(master_remote_tm "$id" --status-brief 2>/dev/null | strip_ansi | tail -1); then
+    echo "❌ <b>${id}</b> SSH/执行失败
+目标: <code>${M_SSH}</code>"
+    return 1
+  fi
+  IFS='|' read -r tag iface mode day_gb limit pct rx tx month_gb <<<"$brief"
+  cat <<EOF
+🖥 <b>${id}</b>
+SSH: <code>${M_SSH}</code>
+标识: <code>${tag}</code> · 网卡: <code>${iface}</code> · 模式: <code>${mode}</code>
+
+日用量: <b>${day_gb}</b> / ${limit} GB (<b>${pct}%</b>)
+  RX: ${rx}
+  TX: ${tx}
+月用量: ${month_gb} GB
+
+更新: $(date '+%Y-%m-%d %H:%M:%S')
+EOF
+}
+
+master_cli() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    ""|-h|--help|help)
+      cat <<'EOF'
+Master 多机管理:
+
+  master enroll <root@host|IP> [选项]   一条命令纳管 Agent
+  master list                           列出已纳管机器
+  master status [id]                    全部总览 / 单机状态
+  master check [id]                     全部或单机检查告警
+  master report [id]                    汇总报告(TG) / 单机远程报告
+  master exec <id> --status|...         在 Agent 上执行任意子命令
+  master remove <id> [--uninstall]      移出清单（可选卸载远程）
+
+示例:
+  traffic-monitor master enroll root@1.2.3.4 --tag sg-1 --iface eth0 --daily 100
+  traffic-monitor master status
+  traffic-monitor master check sg-1
+  traffic-monitor master exec sg-1 --status
+EOF
+      ;;
+    enroll) master_cmd_enroll "$@" ;;
+    list|ls) master_cmd_list "$@" ;;
+    status|st) master_cmd_status "$@" ;;
+    check|ck) master_cmd_check "$@" ;;
+    report|rp) master_cmd_report "$@" ;;
+    exec|run) master_cmd_exec "$@" ;;
+    remove|rm) master_cmd_remove "$@" ;;
+    *)
+      echo "未知 master 子命令: $sub" >&2
+      master_cli --help
+      return 1
+      ;;
+  esac
 }
 
 #-------------------------------------------------------------------------------
@@ -1544,11 +2749,11 @@ daemon_loop() {
   ensure_dirs
   export IN_DAEMON=1
   echo $$ > "$PID_FILE"
-  log INFO "守护进程启动 PID=$$ interval=${CHECK_INTERVAL_SEC}s tg=${TG_ENABLED}"
+  log INFO "守护进程启动 PID=$$ role=${ROLE} interval=${CHECK_INTERVAL_SEC}s tg=${TG_ENABLED} poll=${TG_POLL_ENABLED}"
   trap 'log INFO "守护进程退出"; rm -f "$PID_FILE"; exit 0' INT TERM
 
-  # 启动时注册 bot 命令
-  if [[ "$TG_ENABLED" == "true" ]]; then
+  # 仅负责轮询 TG 的节点注册 bot 命令
+  if tg_should_poll; then
     tg_set_commands
   fi
 
@@ -1562,11 +2767,11 @@ daemon_loop() {
       last_check=$now
     fi
 
-    if [[ "$TG_ENABLED" == "true" && -n "$TG_BOT_TOKEN" ]]; then
+    if tg_should_poll; then
       # long-poll 处理 TG 菜单；失败则短睡避免狂刷
       tg_poll_once 25 || sleep 5
     else
-      # 无 TG 时按剩余间隔休眠
+      # Agent / 无 TG 轮询：按检查间隔休眠
       local sleep_sec=$(( CHECK_INTERVAL_SEC - (now - last_check) ))
       (( sleep_sec < 1 )) && sleep_sec=1
       (( sleep_sec > CHECK_INTERVAL_SEC )) && sleep_sec=$CHECK_INTERVAL_SEC
@@ -1584,7 +2789,11 @@ start_daemon() {
   sleep 0.5
   if is_daemon_running; then
     echo "$(c_green "✓") 守护进程已启动 (PID $(cat "$PID_FILE"))"
-    echo "  提示: 已启用 TG 时，守护进程会同时监听 Telegram 菜单指令"
+    if tg_should_poll; then
+      echo "  提示: 将轮询 Telegram 菜单（ROLE=${ROLE}）"
+    else
+      echo "  提示: 不轮询 TG 菜单（ROLE=${ROLE} TG_POLL_ENABLED=${TG_POLL_ENABLED}），仍会定时检查告警"
+    fi
     log INFO "用户启动守护进程"
   else
     echo "$(c_red "✗") 启动失败，请查看 $LOG_FILE"
@@ -2003,67 +3212,167 @@ menu_reset_day() {
   fi
 }
 
-main_menu() {
+menu_master() {
   local items=(
-    "查看当前状态"
-    "立即检查并告警"
-    "推送状态报告到 Telegram"
-    "基础配置 (网卡/限额/阈值)"
-    "Telegram 配置 / 测试"
-    "推送 TG 内联主菜单"
-    "调度 (守护进程 / Cron)"
-    "查看日志 (最近 40 行)"
-    "清零今日累计"
-    "重新加载配置并显示"
-    "退出"
+    "列出已纳管机器"
+    "多机流量总览"
+    "全部检查告警"
+    "推送多机汇总到 TG"
+    "纳管新机器 (交互)"
+    "返回上级"
   )
+  if ! menu_select "—— Master 多机管理 ——" "${items[@]}"; then
+    return 0
+  fi
+  case "$MENU_RESULT" in
+    0) master_cmd_list ;;
+    1) master_cmd_status ;;
+    2) master_cmd_check ;;
+    3) master_cmd_report ;;
+    4)
+      local t tag iface daily
+      t=$(prompt_input "目标 root@IP 或 IP" "")
+      [[ -z "$t" ]] && { echo "已取消"; return 0; }
+      tag=$(prompt_input "标识 tag (可空=远程 hostname)" "")
+      iface=$(prompt_input "网卡" "${INTERFACE}")
+      daily=$(prompt_input "日限额 GB" "${DAILY_LIMIT_GB}")
+      if [[ -n "$tag" ]]; then
+        master_cmd_enroll "$t" --tag "$tag" --iface "$iface" --daily "$daily"
+      else
+        master_cmd_enroll "$t" --iface "$iface" --daily "$daily"
+      fi
+      ;;
+    *) ;;
+  esac
+}
+
+main_menu() {
+  local items=()
+  if [[ "${ROLE:-standalone}" == "master" ]]; then
+    items+=(
+      "多机管理 (Master)"
+      "查看本机状态"
+      "立即检查并告警"
+      "推送状态报告到 Telegram"
+      "基础配置 (网卡/限额/阈值)"
+      "Telegram 配置 / 测试"
+      "推送 TG 内联主菜单"
+      "调度 (守护进程 / Cron)"
+      "查看日志 (最近 40 行)"
+      "清零今日累计"
+      "重新加载配置并显示"
+      "退出"
+    )
+  else
+    items=(
+      "查看当前状态"
+      "立即检查并告警"
+      "推送状态报告到 Telegram"
+      "基础配置 (网卡/限额/阈值)"
+      "Telegram 配置 / 测试"
+      "推送 TG 内联主菜单"
+      "调度 (守护进程 / Cron)"
+      "查看日志 (最近 40 行)"
+      "清零今日累计"
+      "重新加载配置并显示"
+      "设为本机 Master 角色"
+      "退出"
+    )
+  fi
 
   while true; do
     echo ""
     echo "$(c_bold "╔════════════════════════════════════╗")"
     echo "$(c_bold "║     流量监控 · Traffic Monitor     ║")"
     echo "$(c_bold "╚════════════════════════════════════╝")"
+    echo "  角色: ${ROLE}  ·  主机: ${HOSTNAME_TAG}"
 
     if ! menu_select "请选择功能" "${items[@]}"; then
       echo "再见。"
       exit 0
     fi
 
-    case "$MENU_RESULT" in
-      0) show_status ;;
-      1)
-        check_and_alert
-        show_status
-        echo "$(c_green "✓") 检查完成"
-        ;;
-      2)
-        if send_status_report; then
-          echo "$(c_green "✓") 报告已推送"
-        else
-          echo "$(c_red "✗") 推送失败（请先配置并启用 TG）"
-        fi
-        ;;
-      3) menu_config_basic ;;
-      4) menu_config_tg ;;
-      5) menu_push_tg_menu ;;
-      6) menu_schedule ;;
-      7)
-        echo "$(c_cyan "—— 最近日志 ——")"
-        tail -n 40 "$LOG_FILE" 2>/dev/null || echo "(无日志)"
-        ;;
-      8) menu_reset_day ;;
-      9)
-        load_config
-        show_status
-        ;;
-      10)
-        echo "再见。"
-        exit 0
-        ;;
-      *)
-        echo "$(c_yellow "!") 无效选项"
-        ;;
-    esac
+    if [[ "${ROLE:-standalone}" == "master" ]]; then
+      case "$MENU_RESULT" in
+        0) menu_master ;;
+        1) show_status ;;
+        2)
+          check_and_alert
+          show_status
+          echo "$(c_green "✓") 检查完成"
+          ;;
+        3)
+          if send_status_report; then
+            echo "$(c_green "✓") 报告已推送"
+          else
+            echo "$(c_red "✗") 推送失败（请先配置并启用 TG）"
+          fi
+          ;;
+        4) menu_config_basic ;;
+        5) menu_config_tg ;;
+        6) menu_push_tg_menu ;;
+        7) menu_schedule ;;
+        8)
+          echo "$(c_cyan "—— 最近日志 ——")"
+          tail -n 40 "$LOG_FILE" 2>/dev/null || echo "(无日志)"
+          ;;
+        9) menu_reset_day ;;
+        10)
+          load_config
+          show_status
+          ;;
+        11)
+          echo "再见。"
+          exit 0
+          ;;
+        *)
+          echo "$(c_yellow "!") 无效选项"
+          ;;
+      esac
+    else
+      case "$MENU_RESULT" in
+        0) show_status ;;
+        1)
+          check_and_alert
+          show_status
+          echo "$(c_green "✓") 检查完成"
+          ;;
+        2)
+          if send_status_report; then
+            echo "$(c_green "✓") 报告已推送"
+          else
+            echo "$(c_red "✗") 推送失败（请先配置并启用 TG）"
+          fi
+          ;;
+        3) menu_config_basic ;;
+        4) menu_config_tg ;;
+        5) menu_push_tg_menu ;;
+        6) menu_schedule ;;
+        7)
+          echo "$(c_cyan "—— 最近日志 ——")"
+          tail -n 40 "$LOG_FILE" 2>/dev/null || echo "(无日志)"
+          ;;
+        8) menu_reset_day ;;
+        9)
+          load_config
+          show_status
+          ;;
+        10)
+          ROLE="master"
+          TG_POLL_ENABLED="true"
+          save_config
+          echo "$(c_green "✓") 已设为 master。重新打开菜单即可使用多机管理。"
+          echo "  纳管: $SCRIPT_PATH master enroll root@IP --tag name"
+          ;;
+        11)
+          echo "再见。"
+          exit 0
+          ;;
+        *)
+          echo "$(c_yellow "!") 无效选项"
+          ;;
+      esac
+    fi
   done
 }
 
@@ -2073,14 +3382,16 @@ main_menu() {
 usage() {
   cat <<EOF
 用法: $(basename "$0") [选项]
+       $(basename "$0") master <子命令> ...
 
 不带参数: 进入交互菜单（↑/↓ 选择，回车确认）
 
 选项:
   --status, -s       显示流量状态
+  --status-brief     单行机器可读状态（Master 汇总用）
   --check, -c        更新用量并检查阈值告警
   --report, -r       推送状态报告到 Telegram
-  --daemon           以前台守护循环运行（含 TG 菜单轮询）
+  --daemon           以前台守护循环运行（按 TG_POLL_ENABLED 决定是否轮询 TG）
   --start            后台启动守护进程
   --stop             停止守护进程
   --install-cron [N] 安装 crontab，每 N 分钟检查 (默认 5)
@@ -2093,23 +3404,30 @@ usage() {
   --reset-day        清零今日累计
   --help, -h         显示帮助
 
-Telegram 内联菜单（需启用 TG 并运行守护进程）:
-  /menu /start  主菜单（消息内按钮，非常驻底部）
-  /config       配置中心（网卡/限额/阈值/标识…）
-  /status       流量状态
-  配置中心可对话式修改全部监控参数、调度与清零
+Master 多机 (SSH 纳管 Agent，root 免密):
+  master enroll root@IP [--tag name] [--iface eth0] [--daily 100]
+  master list | status [id] | check [id] | report [id]
+  master exec <id> --status
+  master remove <id> [--uninstall]
+  master help
 
-配置文件: $CONFIG_FILE
-状态目录: $STATE_DIR
-日志文件: $LOG_FILE
+Telegram（需 TG_ENABLED + 守护；仅 Master/Standalone 轮询菜单）:
+  /menu /start  主菜单
+  /status       本机流量
+  /hosts        多机总览（Master）
+  /config /help
+
+配置: $CONFIG_FILE
+清单: $MACHINES_FILE
+状态: $STATE_DIR
+日志: $LOG_FILE
 
 示例:
-  $0                  # 终端交互菜单（方向键选择）
-  $0 --status         # 看一眼用量
-  $0 --check          # cron 调用
-  $0 --start          # 后台监控 + TG 菜单监听
-  $0 --push-menu      # 推送 TG 内联主菜单
-  $0 --install-cron 5 # 每 5 分钟检查
+  $0 --setup
+  $0 --start
+  $0 master enroll root@1.2.3.4 --tag sg-1 --daily 100
+  $0 master status
+  $0 master check
 EOF
 }
 
@@ -2135,12 +3453,30 @@ main() {
       fi
       main_menu
       ;;
+    master)
+      shift
+      master_cli "$@"
+      ;;
     --setup|--install-wizard)
       setup_wizard
       touch "${STATE_DIR}/.setup_done"
       ;;
     --status|-s)
       show_status
+      ;;
+    --status-brief)
+      status_brief
+      ;;
+    --list-ifaces)
+      list_interfaces
+      ;;
+    --set-config)
+      if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+        echo "用法: $0 --set-config KEY VALUE" >&2
+        echo "KEY: INTERFACE DAILY_LIMIT_GB MONTHLY_LIMIT_GB COUNT_MODE ALERT_THRESHOLDS HOSTNAME_TAG ..." >&2
+        exit 1
+      fi
+      apply_set_config "$2" "$3"
       ;;
     --check|-c)
       check_and_alert
