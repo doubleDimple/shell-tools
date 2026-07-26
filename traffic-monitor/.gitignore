@@ -1,0 +1,15 @@
+# 运行时配置与密钥（切勿提交 Token / Chat ID）
+config.conf
+
+# 状态与日志
+state/
+*.log
+*.tmp
+*.bak
+
+# 编辑器 / 系统
+.DS_Store
+*~
+*.swp
+.idea/
+.vscode/

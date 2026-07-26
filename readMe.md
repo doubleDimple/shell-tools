@@ -56,3 +56,15 @@ wget -O smart-exec.sh https://raw.githubusercontent.com/doubleDimple/shell-tools
 ```bash
 ./smart-exec.sh
 ```
+
+## traffic-monitor · 流量监控
+
+服务器网卡日/月流量监控，阈值告警，Telegram 内联菜单配置。
+
+一键安装：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/doubleDimple/shell-tools/master/traffic-monitor/install.sh)
+```
+
+目录：[`traffic-monitor/`](./traffic-monitor/)
