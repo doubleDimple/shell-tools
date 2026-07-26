@@ -215,7 +215,7 @@ normalize_config() {
   MONTHLY_LIMIT_GB="$(strip_ws "${MONTHLY_LIMIT_GB:-0}")"
   COUNT_MODE="$(strip_ws "${COUNT_MODE:-total}")"
   EXCLUDE_LO="$(parse_bool "${EXCLUDE_LO:-true}" "true")"
-  TG_BOT_TOKEN="$(strip_cr "${TG_BOT_TOKEN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  TG_BOT_TOKEN="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
   TG_CHAT_ID="$(strip_ws "${TG_CHAT_ID:-}")"
   TG_ENABLED="$(parse_bool "${TG_ENABLED:-false}" "false")"
   TIMEZONE="$(strip_ws "${TIMEZONE:-}")"
@@ -803,11 +803,57 @@ tg_kb_cancel_input() {
 EOF
 }
 
+# 清洗 Bot Token（去空白/CR；只保留 Telegram 合法字符）
+tg_normalize_token() {
+  local t
+  t="$(printf '%s' "${1:-}" | tr -d '\r\n\t ' )"
+  # 典型格式: 123456:ABC-DEF...
+  if [[ "$t" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+    printf '%s' "$t"
+    return 0
+  fi
+  # 容错：去掉其它奇怪字符后再判
+  t="$(printf '%s' "$t" | tr -cd 'A-Za-z0-9:_-')"
+  printf '%s' "$t"
+}
+
+# 日志中打码 Token，避免泄露
+tg_redact() {
+  local s="${1:-}" tok
+  tok="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
+  if [[ -n "$tok" ]]; then
+    s="${s//${tok}/***TOKEN***}"
+  fi
+  # 兜底：bot数字:密钥 形态
+  s="$(printf '%s' "$s" | sed -E 's#bot[0-9]+:[A-Za-z0-9_-]+#bot***TOKEN***#g')"
+  printf '%s' "$s"
+}
+
+# 构造 API URL：Token 中的 : 编码为 %3A，并配合 curl -g，避免
+# “bad range specification”（部分 curl 把 : 当范围/鉴权分隔符误解析）
+tg_api_url() {
+  local method="${1:-}"
+  local tok enc
+  tok="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
+  [[ -n "$tok" && -n "$method" ]] || return 1
+  enc="${tok//:/%3A}"
+  printf 'https://api.telegram.org/bot%s/%s' "$enc" "$method"
+}
+
+# 统一 curl 调用 Telegram API
+tg_curl() {
+  local method="$1"; shift
+  local url
+  url="$(tg_api_url "$method")" || return 1
+  # -g/--globoff：关闭 [] 等 glob；--url 明确 URL 位置
+  curl -gsS --url "$url" "$@"
+}
+
 # 去掉旧版常驻 Reply Keyboard
 tg_remove_reply_keyboard() {
   local chat_id="${1:-$TG_CHAT_ID}"
   [[ -z "$TG_BOT_TOKEN" || -z "$chat_id" ]] && return 0
-  curl -sS -m 10 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+  tg_curl sendMessage -m 10 -X POST \
     --data-urlencode "chat_id=${chat_id}" \
     --data-urlencode "text=⌨️ 已切换为消息内菜单（旧底部键盘已移除）" \
     --data-urlencode "reply_markup={\"remove_keyboard\":true}" \
@@ -821,10 +867,12 @@ tg_api_send() {
   local markup="${3:-}"
   local parse_mode="${4:-HTML}"
 
+  TG_BOT_TOKEN="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
+  chat_id="$(strip_ws "$chat_id")"
   [[ -z "$TG_BOT_TOKEN" || -z "$chat_id" ]] && return 1
 
   local args=(
-    -sS -m 15 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+    -m 15 -X POST
     --data-urlencode "chat_id=${chat_id}"
     --data-urlencode "text=${text}"
     --data-urlencode "parse_mode=${parse_mode}"
@@ -834,15 +882,15 @@ tg_api_send() {
     args+=(--data-urlencode "reply_markup=${markup}")
   fi
   local resp
-  resp=$(curl "${args[@]}" 2>&1) || {
-    log ERROR "TG send 失败: $resp"
+  resp=$(tg_curl sendMessage "${args[@]}" 2>&1) || {
+    log ERROR "TG send 失败: $(tg_redact "$resp")"
     return 1
   }
   if tg_ok "$resp"; then
     log INFO "Telegram 消息已发送"
     return 0
   fi
-  log ERROR "Telegram API 异常: $resp"
+  log ERROR "Telegram API 异常: $(tg_redact "$resp")"
   return 1
 }
 
@@ -850,7 +898,7 @@ tg_api_send() {
 tg_api_edit() {
   local chat_id="$1" msg_id="$2" text="$3" markup="${4:-}"
   local args=(
-    -sS -m 15 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/editMessageText"
+    -m 15 -X POST
     --data-urlencode "chat_id=${chat_id}"
     --data-urlencode "message_id=${msg_id}"
     --data-urlencode "text=${text}"
@@ -861,11 +909,11 @@ tg_api_edit() {
     args+=(--data-urlencode "reply_markup=${markup}")
   fi
   local resp
-  resp=$(curl "${args[@]}" 2>&1) || true
+  resp=$(tg_curl editMessageText "${args[@]}" 2>&1) || true
   # 内容未变时 API 报错，忽略
   tg_ok "$resp" && return 0
   echo "$resp" | grep -q 'message is not modified' && return 0
-  log DEBUG "editMessage 响应: $resp"
+  log DEBUG "editMessage 响应: $(tg_redact "$resp")"
   return 0
 }
 
@@ -873,11 +921,11 @@ tg_answer_cb() {
   local cb_id="$1"
   local text="${2:-}"
   local args=(
-    -sS -m 10 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/answerCallbackQuery"
+    -m 10 -X POST
     --data-urlencode "callback_query_id=${cb_id}"
   )
   [[ -n "$text" ]] && args+=(--data-urlencode "text=${text}" --data-urlencode "show_alert=false")
-  curl "${args[@]}" >/dev/null 2>&1 || true
+  tg_curl answerCallbackQuery "${args[@]}" >/dev/null 2>&1 || true
 }
 
 # 告警/报告用的发送（尊重 TG_ENABLED）
@@ -914,6 +962,7 @@ tg_send() {
 }
 
 tg_set_commands() {
+  TG_BOT_TOKEN="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
   [[ -z "$TG_BOT_TOKEN" ]] && return 1
   local cmds
   if [[ "${ROLE:-standalone}" == "master" ]]; then
@@ -921,7 +970,7 @@ tg_set_commands() {
   else
     cmds='[{"command":"start","description":"打开主菜单"},{"command":"menu","description":"打开主菜单"},{"command":"status","description":"流量状态"},{"command":"config","description":"配置中心"},{"command":"help","description":"帮助"}]'
   fi
-  curl -sS -m 10 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/setMyCommands" \
+  tg_curl setMyCommands -m 10 -X POST \
     --data-urlencode "commands=${cmds}" >/dev/null 2>&1 || true
 }
 
@@ -1914,18 +1963,18 @@ tg_save_offset() {
 
 tg_poll_once() {
   local timeout="${1:-25}"
-  [[ "$TG_ENABLED" == "true" ]] || return 0
+  [[ "$(parse_bool "${TG_ENABLED:-false}" "false")" == "true" ]] || return 0
+  TG_BOT_TOKEN="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
   [[ -n "$TG_BOT_TOKEN" ]] || return 0
 
   local offset
   offset="$(tg_load_offset)"
   local resp
-  resp=$(curl -sS -m $((timeout + 10)) -X POST \
-    "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates" \
+  resp=$(tg_curl getUpdates -m $((timeout + 10)) -X POST \
     --data-urlencode "offset=${offset}" \
     --data-urlencode "timeout=${timeout}" \
     --data-urlencode 'allowed_updates=["message","callback_query"]' 2>&1) || {
-    log ERROR "getUpdates 失败: $resp"
+    log ERROR "getUpdates 失败: $(tg_redact "$resp")"
     return 1
   }
 
@@ -2885,6 +2934,8 @@ is_daemon_running() {
 }
 
 daemon_loop() {
+  # 避免启动目录被删后 getcwd 报错
+  cd "$SCRIPT_DIR" 2>/dev/null || cd / 2>/dev/null || true
   ensure_dirs
   export IN_DAEMON=1
   # 再规范化一次，防止 config 带 \r 导致 (( )) 崩溃
@@ -2892,6 +2943,7 @@ daemon_loop() {
   local check_iv
   check_iv="$(sanitize_uint "${CHECK_INTERVAL_SEC}" 300 10 86400)"
   CHECK_INTERVAL_SEC="$check_iv"
+  TG_BOT_TOKEN="$(tg_normalize_token "${TG_BOT_TOKEN:-}")"
 
   echo $$ > "$PID_FILE"
   log INFO "守护进程启动 PID=$$ role=${ROLE} interval=${check_iv}s tg=${TG_ENABLED} poll=${TG_POLL_ENABLED}"
@@ -2941,7 +2993,11 @@ start_daemon() {
     echo "$(c_yellow "!") 守护进程已在运行 (PID $(cat "$PID_FILE"))"
     return 0
   fi
-  nohup bash "$SCRIPT_PATH" --daemon >> "$LOG_FILE" 2>&1 &
+  # 固定工作目录，避免 cwd 被删除后 shell-init/getcwd 报错
+  (
+    cd "$SCRIPT_DIR" 2>/dev/null || cd / || true
+    nohup bash "$SCRIPT_PATH" --daemon >> "$LOG_FILE" 2>&1 &
+  )
   sleep 0.5
   if is_daemon_running; then
     echo "$(c_green "✓") 守护进程已启动 (PID $(cat "$PID_FILE"))"
@@ -3623,6 +3679,7 @@ EOF
 # 入口
 #-------------------------------------------------------------------------------
 main() {
+  cd "$SCRIPT_DIR" 2>/dev/null || true
   ensure_dirs
   load_config
 
