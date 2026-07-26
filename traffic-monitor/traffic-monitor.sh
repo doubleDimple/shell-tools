@@ -172,18 +172,37 @@ sanitize_uint() {
   printf '%s' "$n"
 }
 
+# 宽松布尔解析 → true|false（接受 yes/y/1/on/是/开启 等）
+# 第二参数为「空输入」时的默认值
+parse_bool() {
+  local v def="${2:-false}"
+  v="$(printf '%s' "${1:-}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    1|true|yes|y|on|enable|enabled|是|开启|开) echo "true" ;;
+    0|false|no|n|off|disable|disabled|否|关闭|关) echo "false" ;;
+    "") echo "${def}" ;;
+    *)
+      if [[ "$v" == *true* ]]; then echo "true"
+      elif [[ "$v" == *false* ]]; then echo "false"
+      else echo "$def"
+      fi
+      ;;
+  esac
+}
+
 # 是否应轮询 Telegram（仅 Master/Standalone 交互菜单需要）
 tg_should_poll() {
-  local v
-  v="$(strip_ws "${TG_POLL_ENABLED:-}")"
-  if [[ -z "$v" ]]; then
-    if [[ "$(strip_ws "${ROLE:-standalone}")" == "agent" ]]; then
-      v="false"
-    else
-      v="true"
+  local poll en token
+  en="$(parse_bool "${TG_ENABLED:-false}" "false")"
+  poll="$(parse_bool "${TG_POLL_ENABLED:-true}" "true")"
+  if [[ "$(strip_ws "${ROLE:-standalone}")" == "agent" ]]; then
+    # agent 未显式配置时默认不轮询
+    if [[ -z "$(strip_ws "${TG_POLL_ENABLED:-}")" ]]; then
+      poll="false"
     fi
   fi
-  [[ "$v" == "true" && "$(strip_ws "${TG_ENABLED:-false}")" == "true" && -n "$(strip_ws "${TG_BOT_TOKEN:-}")" ]]
+  token="$(strip_ws "${TG_BOT_TOKEN:-}")"
+  [[ "$poll" == "true" && "$en" == "true" && -n "$token" ]]
 }
 
 # source 配置后规范化（数值去 \r，避免算术运算炸）
@@ -195,16 +214,16 @@ normalize_config() {
   DAILY_LIMIT_GB="$(strip_ws "${DAILY_LIMIT_GB:-100}")"
   MONTHLY_LIMIT_GB="$(strip_ws "${MONTHLY_LIMIT_GB:-0}")"
   COUNT_MODE="$(strip_ws "${COUNT_MODE:-total}")"
-  EXCLUDE_LO="$(strip_ws "${EXCLUDE_LO:-true}")"
-  TG_BOT_TOKEN="$(strip_cr "${TG_BOT_TOKEN:-}")"
+  EXCLUDE_LO="$(parse_bool "${EXCLUDE_LO:-true}" "true")"
+  TG_BOT_TOKEN="$(strip_cr "${TG_BOT_TOKEN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   TG_CHAT_ID="$(strip_ws "${TG_CHAT_ID:-}")"
-  TG_ENABLED="$(strip_ws "${TG_ENABLED:-false}")"
-  TG_POLL_ENABLED="$(strip_ws "${TG_POLL_ENABLED:-}")"
+  TG_ENABLED="$(parse_bool "${TG_ENABLED:-false}" "false")"
   TIMEZONE="$(strip_ws "${TIMEZONE:-}")"
   HOSTNAME_TAG="$(strip_ws "${HOSTNAME_TAG:-server}")"
+  [[ -z "$HOSTNAME_TAG" ]] && HOSTNAME_TAG="server"
   SSH_OPTS="$(strip_cr "${SSH_OPTS:-}")"
   REMOTE_INSTALL_DIR="$(strip_ws "${REMOTE_INSTALL_DIR:-/opt/traffic-monitor}")"
-  ALERT_THRESHOLDS="$(strip_ws "${ALERT_THRESHOLDS:-50,80,90,95,100}")"
+  ALERT_THRESHOLDS="$(strip_ws "${ALERT_THRESHOLDS:-50,80,90,95,100}" | tr -d ' ')"
 
   CHECK_INTERVAL_SEC="$(sanitize_uint "${CHECK_INTERVAL_SEC:-300}" 300 10 86400)"
   ALERT_COOLDOWN_MIN="$(sanitize_uint "${ALERT_COOLDOWN_MIN:-60}" 60 1 10080)"
@@ -218,15 +237,34 @@ normalize_config() {
     MONTHLY_LIMIT_GB="0"
   fi
 
-  if [[ -z "$TG_POLL_ENABLED" ]]; then
+  # 清洗阈值列表，只保留 1–100 的整数，避免空项/脏数据导致 0% 也告警
+  local _ thr_clean=() _t
+  IFS=',' read -ra _ <<<"${ALERT_THRESHOLDS}"
+  for _t in "${_[@]}"; do
+    _t="$(printf '%s' "$_t" | tr -d '\r\n\t ')"
+    [[ "$_t" =~ ^[0-9]+$ ]] || continue
+    _t=$((10#$_t))
+    (( _t >= 1 && _t <= 100 )) || continue
+    thr_clean+=("$_t")
+  done
+  if ((${#thr_clean[@]} == 0)); then
+    ALERT_THRESHOLDS="50,80,90,95,100"
+  else
+    local IFS=','
+    ALERT_THRESHOLDS="${thr_clean[*]}"
+  fi
+
+  # TG 轮询：agent 默认 false；其余默认 true
+  if [[ -z "$(strip_ws "${TG_POLL_ENABLED:-}")" ]]; then
     if [[ "$ROLE" == "agent" ]]; then
       TG_POLL_ENABLED="false"
     else
       TG_POLL_ENABLED="true"
     fi
+  else
+    TG_POLL_ENABLED="$(parse_bool "${TG_POLL_ENABLED}" "true")"
   fi
-  case "$TG_ENABLED" in true|false) ;; *) TG_ENABLED="false" ;; esac
-  case "$TG_POLL_ENABLED" in true|false) ;; *) TG_POLL_ENABLED="true" ;; esac
+
   case "$COUNT_MODE" in total|rx|tx) ;; *) COUNT_MODE="total" ;; esac
 }
 
@@ -847,15 +885,27 @@ tg_send() {
   local text="$1"
   local parse_mode="${2:-HTML}"
   local with_menu="${3:-false}"
+  local en token chat
 
-  if [[ "$TG_ENABLED" != "true" ]]; then
-    log DEBUG "TG 未启用，跳过发送"
+  en="$(parse_bool "${TG_ENABLED:-false}" "false")"
+  token="$(strip_ws "${TG_BOT_TOKEN:-}")"
+  chat="$(strip_ws "${TG_CHAT_ID:-}")"
+
+  if [[ "$en" != "true" ]]; then
+    if [[ -n "$token" && -n "$chat" ]]; then
+      log WARN "TG 未启用(TG_ENABLED=${TG_ENABLED})，已配置 Token/Chat 但不会发送。请执行: $SCRIPT_PATH --set-config TG_ENABLED true"
+    else
+      log DEBUG "TG 未启用，跳过发送"
+    fi
     return 0
   fi
-  if [[ -z "$TG_BOT_TOKEN" || -z "$TG_CHAT_ID" ]]; then
+  if [[ -z "$token" || -z "$chat" ]]; then
     log WARN "TG_BOT_TOKEN 或 TG_CHAT_ID 未配置"
     return 1
   fi
+  TG_BOT_TOKEN="$token"
+  TG_CHAT_ID="$chat"
+  TG_ENABLED="true"
   local markup=""
   if [[ "$with_menu" == "true" ]]; then
     markup="$(tg_kb_nav_main)"
@@ -1994,26 +2044,36 @@ check_and_alert() {
   day_limit_b=$(gb_to_bytes "$DAILY_LIMIT_GB")
   day_p=$(pct "$day_used" "$day_limit_b")
 
-  local thr t
-  IFS=',' read -ra thr <<< "$ALERT_THRESHOLDS"
-  for t in "${thr[@]}"; do
-    t=$(echo "$t" | tr -d ' ')
-    [[ -z "$t" ]] && continue
-    if awk -v p="$day_p" -v t="$t" 'BEGIN { exit !(p+0 >= t+0) }'; then
-      if ! alert_already_sent "daily" "$t"; then
-        send_threshold_alert "daily" "$t" "$day_used" "$day_limit_b" "$day_p"
-        mark_alert_sent "daily" "$t"
+  # 限额无效时不做日告警
+  if awk -v l="$day_limit_b" 'BEGIN { exit !(l+0 > 0) }'; then
+    local thr t
+    IFS=',' read -ra thr <<< "$ALERT_THRESHOLDS"
+    for t in "${thr[@]}"; do
+      t="$(printf '%s' "$t" | tr -d '\r\n\t ')"
+      [[ "$t" =~ ^[0-9]+$ ]] || continue
+      t=$((10#$t))
+      (( t >= 1 && t <= 100 )) || continue
+      # 必须真实达到阈值（防止脏数据把 t 变成 0）
+      if awk -v p="$day_p" -v th="$t" 'BEGIN { exit !(p+0 >= th+0 && th+0 > 0) }'; then
+        if ! alert_already_sent "daily" "$t"; then
+          send_threshold_alert "daily" "$t" "$day_used" "$day_limit_b" "$day_p"
+          mark_alert_sent "daily" "$t"
+        fi
       fi
-    fi
-  done
+    done
+  fi
 
   if awk -v m="$MONTHLY_LIMIT_GB" 'BEGIN { exit !(m+0 > 0) }'; then
     month_limit_b=$(gb_to_bytes "$MONTHLY_LIMIT_GB")
     month_p=$(pct "$month_used" "$month_limit_b")
+    local thr t
+    IFS=',' read -ra thr <<< "$ALERT_THRESHOLDS"
     for t in "${thr[@]}"; do
-      t=$(echo "$t" | tr -d ' ')
-      [[ -z "$t" ]] && continue
-      if awk -v p="$month_p" -v t="$t" 'BEGIN { exit !(p+0 >= t+0) }'; then
+      t="$(printf '%s' "$t" | tr -d '\r\n\t ')"
+      [[ "$t" =~ ^[0-9]+$ ]] || continue
+      t=$((10#$t))
+      (( t >= 1 && t <= 100 )) || continue
+      if awk -v p="$month_p" -v th="$t" 'BEGIN { exit !(p+0 >= th+0 && th+0 > 0) }'; then
         if ! alert_already_sent "monthly" "$t"; then
           send_threshold_alert "monthly" "$t" "$month_used" "$month_limit_b" "$month_p"
           mark_alert_sent "monthly" "$t"
@@ -2314,6 +2374,7 @@ master_remote_tm() {
 # 本机写入单项配置（供 CLI / 远程 --set-config）
 apply_set_config() {
   local key="$1" value="$2"
+  value="$(strip_ws "$value")"
   case "$key" in
     INTERFACE) INTERFACE="$value" ;;
     DAILY_LIMIT_GB) DAILY_LIMIT_GB="$value" ;;
@@ -2323,8 +2384,10 @@ apply_set_config() {
     ALERT_COOLDOWN_MIN) ALERT_COOLDOWN_MIN="$value" ;;
     CHECK_INTERVAL_SEC) CHECK_INTERVAL_SEC="$value" ;;
     HOSTNAME_TAG) HOSTNAME_TAG="$value" ;;
-    TG_ENABLED) TG_ENABLED="$value" ;;
-    TG_POLL_ENABLED) TG_POLL_ENABLED="$value" ;;
+    TG_BOT_TOKEN) TG_BOT_TOKEN="$value" ;;
+    TG_CHAT_ID) TG_CHAT_ID="$value" ;;
+    TG_ENABLED) TG_ENABLED="$(parse_bool "$value" "false")" ;;
+    TG_POLL_ENABLED) TG_POLL_ENABLED="$(parse_bool "$value" "true")" ;;
     *)
       echo "不支持的配置键: $key" >&2
       return 1
@@ -2332,7 +2395,14 @@ apply_set_config() {
   esac
   save_config
   load_config
-  echo "OK ${key}=${value}"
+  # 打印规范化后的值
+  local out="$value"
+  case "$key" in
+    TG_ENABLED) out="$TG_ENABLED" ;;
+    TG_POLL_ENABLED) out="$TG_POLL_ENABLED" ;;
+    CHECK_INTERVAL_SEC) out="$CHECK_INTERVAL_SEC" ;;
+  esac
+  echo "OK ${key}=${out}"
 }
 
 # 远程改配置，并同步 machines.conf 关键字段
@@ -2825,6 +2895,13 @@ daemon_loop() {
 
   echo $$ > "$PID_FILE"
   log INFO "守护进程启动 PID=$$ role=${ROLE} interval=${check_iv}s tg=${TG_ENABLED} poll=${TG_POLL_ENABLED}"
+  if [[ "$(parse_bool "${TG_ENABLED:-false}" "false")" != "true" ]]; then
+    if [[ -n "$(strip_ws "${TG_BOT_TOKEN:-}")" && -n "$(strip_ws "${TG_CHAT_ID:-}")" ]]; then
+      log WARN "已配置 TG Token/Chat，但 TG_ENABLED=${TG_ENABLED}，告警不会推送。执行: $SCRIPT_PATH --set-config TG_ENABLED true && $SCRIPT_PATH --start"
+    else
+      log WARN "Telegram 未启用或未配置 Token/Chat ID"
+    fi
+  fi
   trap 'log INFO "守护进程退出"; rm -f "$PID_FILE"; exit 0' INT TERM
 
   # 仅负责轮询 TG 的节点注册 bot 命令
@@ -3197,18 +3274,35 @@ menu_config_tg() {
   echo "   私聊可用 @userinfobot；群可把 bot 加进群后访问:"
   echo "   https://api.telegram.org/bot<Token>/getUpdates"
   echo "3) 配置完成后启动守护进程，即可用 TG 内联菜单遥控/改配置"
+  echo "   启用项请填 true/yes/1（不要只填 Token 却把启用留 false）"
   echo ""
   TG_BOT_TOKEN=$(prompt_input "Bot Token" "$TG_BOT_TOKEN")
   TG_CHAT_ID=$(prompt_input "Chat ID" "$TG_CHAT_ID")
-  local en
-  en=$(prompt_input "启用 Telegram? (true/false)" "$TG_ENABLED")
-  TG_ENABLED="$en"
+  local en def_en="false"
+  # 已填写密钥时，默认建议启用
+  if [[ -n "$(strip_ws "$TG_BOT_TOKEN")" && -n "$(strip_ws "$TG_CHAT_ID")" ]]; then
+    def_en="true"
+  fi
+  [[ "$(parse_bool "${TG_ENABLED:-false}" "false")" == "true" ]] && def_en="true"
+  en=$(prompt_input "启用 Telegram? (true/yes/false/no)" "$def_en")
+  TG_ENABLED="$(parse_bool "$en" "true")"
+  # 有 Token+Chat 时默认启用；用户明确填 false 才关闭
+  if [[ -n "$(strip_ws "$TG_BOT_TOKEN")" && -n "$(strip_ws "$TG_CHAT_ID")" ]]; then
+    if [[ "$(parse_bool "$en" "true")" != "false" ]]; then
+      TG_ENABLED="true"
+    fi
+  fi
   save_config
-  echo "$(c_green "✓") Telegram 配置已保存"
+  echo "$(c_green "✓") Telegram 配置已保存  TG_ENABLED=${TG_ENABLED}"
+  if [[ "$TG_ENABLED" != "true" ]]; then
+    echo "$(c_yellow "!") 当前未启用：告警/报告不会发到 TG"
+    echo "  可执行: $SCRIPT_PATH --set-config TG_ENABLED true"
+  fi
   local t
-  t=$(prompt_input "现在发送测试消息并推送内联菜单? (y/N)" "N")
+  t=$(prompt_input "现在发送测试消息并推送内联菜单? (y/N)" "Y")
   if [[ "$t" =~ ^[Yy]$ ]]; then
     TG_ENABLED="true"
+    save_config
     tg_test
   fi
 }
