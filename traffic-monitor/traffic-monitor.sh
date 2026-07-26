@@ -64,15 +64,15 @@ c_rev()    { printf '\033[7m%s\033[0m' "$*"; }
 log() {
   local level="$1"; shift
   local msg="$*"
-  local ts
+  local ts lines max_lines
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
   echo "[$ts] [$level] $msg" >> "$LOG_FILE" 2>/dev/null || true
   # 日志轮转
   if [[ -f "$LOG_FILE" ]]; then
-    local lines
-    lines=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-    if (( lines > LOG_MAX_LINES )); then
-      tail -n "$((LOG_MAX_LINES / 2))" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    lines=$(wc -l < "$LOG_FILE" 2>/dev/null | tr -d ' \r' || echo 0)
+    max_lines="$(sanitize_uint "${LOG_MAX_LINES:-2000}" 2000 100 1000000 2>/dev/null || echo 2000)"
+    if [[ "$lines" =~ ^[0-9]+$ ]] && (( lines > max_lines )); then
+      tail -n "$((max_lines / 2))" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
     fi
   fi
 }
@@ -137,53 +137,118 @@ progress_bar() {
 #-------------------------------------------------------------------------------
 # 配置加载 / 保存
 #-------------------------------------------------------------------------------
+# 去掉 CR（Windows 换行 / 错误编辑会把 \r 写进变量，导致 (( )) 报错）
+strip_cr() {
+  printf '%s' "${1:-}" | tr -d '\r'
+}
+
+# 去 CR + 首尾空白
+strip_ws() {
+  printf '%s' "${1:-}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 # 配置值转义（写入双引号赋值）
 cfg_escape() {
-  printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\$/g' -e 's/`/\\`/g'
+  strip_cr "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\$/g' -e 's/`/\\`/g'
+}
+
+# 清洗为正整数（去 CR/空白；非法则用默认）
+# 用法: sanitize_uint "原始" "默认" [最小] [最大]  → stdout
+sanitize_uint() {
+  local raw="${1:-}" def="${2:-1}" min_v="${3:-0}" max_v="${4:-}"
+  local n
+  n="$(printf '%s' "$raw" | tr -d '\r\n\t ' )"
+  if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    n="$def"
+  fi
+  # 10# 避免前导零被当成八进制
+  n=$((10#$n))
+  if (( n < min_v )); then
+    n=$min_v
+  fi
+  if [[ -n "$max_v" ]] && (( n > max_v )); then
+    n=$max_v
+  fi
+  printf '%s' "$n"
 }
 
 # 是否应轮询 Telegram（仅 Master/Standalone 交互菜单需要）
 tg_should_poll() {
-  local v="${TG_POLL_ENABLED:-}"
+  local v
+  v="$(strip_ws "${TG_POLL_ENABLED:-}")"
   if [[ -z "$v" ]]; then
-    if [[ "${ROLE:-standalone}" == "agent" ]]; then
+    if [[ "$(strip_ws "${ROLE:-standalone}")" == "agent" ]]; then
       v="false"
     else
       v="true"
     fi
   fi
-  [[ "$v" == "true" && "${TG_ENABLED:-false}" == "true" && -n "${TG_BOT_TOKEN:-}" ]]
+  [[ "$v" == "true" && "$(strip_ws "${TG_ENABLED:-false}")" == "true" && -n "$(strip_ws "${TG_BOT_TOKEN:-}")" ]]
 }
 
-load_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+# source 配置后规范化（数值去 \r，避免算术运算炸）
+normalize_config() {
+  ROLE="$(strip_ws "${ROLE:-standalone}")"
+  [[ -z "$ROLE" ]] && ROLE="standalone"
+  INTERFACE="$(strip_ws "${INTERFACE:-eth0}")"
+  [[ -z "$INTERFACE" ]] && INTERFACE="eth0"
+  DAILY_LIMIT_GB="$(strip_ws "${DAILY_LIMIT_GB:-100}")"
+  MONTHLY_LIMIT_GB="$(strip_ws "${MONTHLY_LIMIT_GB:-0}")"
+  COUNT_MODE="$(strip_ws "${COUNT_MODE:-total}")"
+  EXCLUDE_LO="$(strip_ws "${EXCLUDE_LO:-true}")"
+  TG_BOT_TOKEN="$(strip_cr "${TG_BOT_TOKEN:-}")"
+  TG_CHAT_ID="$(strip_ws "${TG_CHAT_ID:-}")"
+  TG_ENABLED="$(strip_ws "${TG_ENABLED:-false}")"
+  TG_POLL_ENABLED="$(strip_ws "${TG_POLL_ENABLED:-}")"
+  TIMEZONE="$(strip_ws "${TIMEZONE:-}")"
+  HOSTNAME_TAG="$(strip_ws "${HOSTNAME_TAG:-server}")"
+  SSH_OPTS="$(strip_cr "${SSH_OPTS:-}")"
+  REMOTE_INSTALL_DIR="$(strip_ws "${REMOTE_INSTALL_DIR:-/opt/traffic-monitor}")"
+  ALERT_THRESHOLDS="$(strip_ws "${ALERT_THRESHOLDS:-50,80,90,95,100}")"
+
+  CHECK_INTERVAL_SEC="$(sanitize_uint "${CHECK_INTERVAL_SEC:-300}" 300 10 86400)"
+  ALERT_COOLDOWN_MIN="$(sanitize_uint "${ALERT_COOLDOWN_MIN:-60}" 60 1 10080)"
+  LOG_MAX_LINES="$(sanitize_uint "${LOG_MAX_LINES:-2000}" 2000 100 1000000)"
+
+  # 日/月限额允许小数
+  if ! [[ "$DAILY_LIMIT_GB" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    DAILY_LIMIT_GB="100"
   fi
-  ROLE="${ROLE:-standalone}"
-  REMOTE_INSTALL_DIR="${REMOTE_INSTALL_DIR:-/opt/traffic-monitor}"
-  SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30}"
-  if [[ -z "${TG_POLL_ENABLED:-}" ]]; then
+  if ! [[ "$MONTHLY_LIMIT_GB" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    MONTHLY_LIMIT_GB="0"
+  fi
+
+  if [[ -z "$TG_POLL_ENABLED" ]]; then
     if [[ "$ROLE" == "agent" ]]; then
       TG_POLL_ENABLED="false"
     else
       TG_POLL_ENABLED="true"
     fi
   fi
+  case "$TG_ENABLED" in true|false) ;; *) TG_ENABLED="false" ;; esac
+  case "$TG_POLL_ENABLED" in true|false) ;; *) TG_POLL_ENABLED="true" ;; esac
+  case "$COUNT_MODE" in total|rx|tx) ;; *) COUNT_MODE="total" ;; esac
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # 先去掉文件中的 CR，再 source，避免 CRLF 配置污染变量
+    local _cfg_clean
+    _cfg_clean="$(mktemp)"
+    tr -d '\r' < "$CONFIG_FILE" > "$_cfg_clean" 2>/dev/null || cp "$CONFIG_FILE" "$_cfg_clean"
+    # shellcheck disable=SC1090
+    source "$_cfg_clean"
+    rm -f "$_cfg_clean"
+  fi
+  normalize_config
   if [[ -n "$TIMEZONE" ]]; then
     export TZ="$TIMEZONE"
   fi
 }
 
 save_config() {
-  # 规范化轮询默认值再落盘
-  if [[ -z "${TG_POLL_ENABLED:-}" ]]; then
-    if [[ "${ROLE:-standalone}" == "agent" ]]; then
-      TG_POLL_ENABLED="false"
-    else
-      TG_POLL_ENABLED="true"
-    fi
-  fi
+  normalize_config
+  # 使用 Unix 换行写入，避免再次引入 \r
   cat > "$CONFIG_FILE" <<EOF
 # 流量监控配置 - 由 traffic-monitor.sh 自动生成
 # 修改后下次运行生效；也可用菜单修改
@@ -304,15 +369,15 @@ EOF
 load_state() {
   # shellcheck disable=SC1090
   source "$STATE_FILE"
-  day="${day:-}"
-  month="${month:-}"
-  day_rx="${day_rx:-0}"
-  day_tx="${day_tx:-0}"
-  month_rx="${month_rx:-0}"
-  month_tx="${month_tx:-0}"
-  last_rx="${last_rx:-0}"
-  last_tx="${last_tx:-0}"
-  last_update="${last_update:-0}"
+  day="$(strip_ws "${day:-}")"
+  month="$(strip_ws "${month:-}")"
+  day_rx="$(sanitize_uint "${day_rx:-0}" 0 0)"
+  day_tx="$(sanitize_uint "${day_tx:-0}" 0 0)"
+  month_rx="$(sanitize_uint "${month_rx:-0}" 0 0)"
+  month_tx="$(sanitize_uint "${month_tx:-0}" 0 0)"
+  last_rx="$(sanitize_uint "${last_rx:-0}" 0 0)"
+  last_tx="$(sanitize_uint "${last_tx:-0}" 0 0)"
+  last_update="$(sanitize_uint "${last_update:-0}" 0 0)"
 }
 
 save_state() {
@@ -1896,12 +1961,14 @@ alert_already_sent() {
   local today
   today="$(date +%Y-%m-%d)"
   [[ -f "$ALERT_STATE_FILE" ]] || return 1
-  local line last_ts now cooldown_sec
+  local line last_ts now cooldown_sec cool_min
   line=$(grep -E "^${today}\|${scope}\|${threshold}\|" "$ALERT_STATE_FILE" 2>/dev/null | tail -1 || true)
   [[ -z "$line" ]] && return 1
-  last_ts=$(echo "$line" | awk -F'|' '{print $4}')
+  last_ts=$(echo "$line" | awk -F'|' '{print $4}' | tr -d '\r')
+  last_ts="$(sanitize_uint "${last_ts:-0}" 0 0)"
   now=$(date +%s)
-  cooldown_sec=$((ALERT_COOLDOWN_MIN * 60))
+  cool_min="$(sanitize_uint "${ALERT_COOLDOWN_MIN}" 60 1 10080)"
+  cooldown_sec=$((cool_min * 60))
   if (( now - last_ts < cooldown_sec )); then
     return 0  # 已发送且在冷却中
   fi
@@ -2750,8 +2817,14 @@ is_daemon_running() {
 daemon_loop() {
   ensure_dirs
   export IN_DAEMON=1
+  # 再规范化一次，防止 config 带 \r 导致 (( )) 崩溃
+  load_config
+  local check_iv
+  check_iv="$(sanitize_uint "${CHECK_INTERVAL_SEC}" 300 10 86400)"
+  CHECK_INTERVAL_SEC="$check_iv"
+
   echo $$ > "$PID_FILE"
-  log INFO "守护进程启动 PID=$$ role=${ROLE} interval=${CHECK_INTERVAL_SEC}s tg=${TG_ENABLED} poll=${TG_POLL_ENABLED}"
+  log INFO "守护进程启动 PID=$$ role=${ROLE} interval=${check_iv}s tg=${TG_ENABLED} poll=${TG_POLL_ENABLED}"
   trap 'log INFO "守护进程退出"; rm -f "$PID_FILE"; exit 0' INT TERM
 
   # 仅负责轮询 TG 的节点注册 bot 命令
@@ -2759,12 +2832,12 @@ daemon_loop() {
     tg_set_commands
   fi
 
-  local last_check=0 now
+  local last_check=0 now sleep_sec
   last_check=0
 
   while true; do
     now=$(date +%s)
-    if (( now - last_check >= CHECK_INTERVAL_SEC )); then
+    if (( now - last_check >= check_iv )); then
       check_and_alert || log ERROR "check_and_alert 执行失败"
       last_check=$now
     fi
@@ -2774,9 +2847,13 @@ daemon_loop() {
       tg_poll_once 25 || sleep 5
     else
       # Agent / 无 TG 轮询：按检查间隔休眠
-      local sleep_sec=$(( CHECK_INTERVAL_SEC - (now - last_check) ))
-      (( sleep_sec < 1 )) && sleep_sec=1
-      (( sleep_sec > CHECK_INTERVAL_SEC )) && sleep_sec=$CHECK_INTERVAL_SEC
+      sleep_sec=$(( check_iv - (now - last_check) ))
+      if (( sleep_sec < 1 )); then
+        sleep_sec=1
+      fi
+      if (( sleep_sec > check_iv )); then
+        sleep_sec=$check_iv
+      fi
       sleep "$sleep_sec"
     fi
   done
@@ -2822,26 +2899,6 @@ stop_daemon() {
 
 has_cron() {
   crontab -l 2>/dev/null | grep -qF "$CRON_TAG"
-}
-
-# 清洗为正整数（去 CR/空白；非法则用默认）
-# 用法: sanitize_uint "原始" "默认" [最小] [最大]  → stdout
-sanitize_uint() {
-  local raw="${1:-}" def="${2:-1}" min_v="${3:-1}" max_v="${4:-}"
-  local n
-  n="$(printf '%s' "$raw" | tr -d '\r\n\t ' )"
-  if ! [[ "$n" =~ ^[0-9]+$ ]]; then
-    n="$def"
-  fi
-  # 10# 避免前导零被当成八进制
-  n=$((10#$n))
-  if (( n < min_v )); then
-    n=$min_v
-  fi
-  if [[ -n "$max_v" ]] && (( n > max_v )); then
-    n=$max_v
-  fi
-  printf '%s' "$n"
 }
 
 install_cron() {
