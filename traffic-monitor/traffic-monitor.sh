@@ -1349,8 +1349,10 @@ PID: $(cat "$PID_FILE" 2>/dev/null || echo -)" "$(tg_kb_sched)" "$msg_id"
       ;;
     cron:*)
       local mins="${data#cron:}"
+      mins="$(printf '%s' "$mins" | tr -d '\r\n\t ')"
       if [[ "$mins" =~ ^[0-9]+$ ]]; then
         install_cron "$mins" >/dev/null
+        mins="$(sanitize_uint "$mins" 5 1 59)"
         tg_answer_cb "$cb_id" "Cron ${mins}m"
         tg_show "$chat_id" "✅ 已安装 crontab：每 ${mins} 分钟检查" "$(tg_kb_sched)" "$msg_id"
       else
@@ -2822,21 +2824,52 @@ has_cron() {
   crontab -l 2>/dev/null | grep -qF "$CRON_TAG"
 }
 
+# 清洗为正整数（去 CR/空白；非法则用默认）
+# 用法: sanitize_uint "原始" "默认" [最小] [最大]  → stdout
+sanitize_uint() {
+  local raw="${1:-}" def="${2:-1}" min_v="${3:-1}" max_v="${4:-}"
+  local n
+  n="$(printf '%s' "$raw" | tr -d '\r\n\t ' )"
+  if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    n="$def"
+  fi
+  # 10# 避免前导零被当成八进制
+  n=$((10#$n))
+  if (( n < min_v )); then
+    n=$min_v
+  fi
+  if [[ -n "$max_v" ]] && (( n > max_v )); then
+    n=$max_v
+  fi
+  printf '%s' "$n"
+}
+
 install_cron() {
-  local interval_min="${1:-5}"
-  # 至少 1 分钟
-  (( interval_min < 1 )) && interval_min=1
+  # cron 分钟步长 1–59；输入可能带 \r（Windows/部分终端）导致 (( )) 与 crontab 报错
+  local interval_min
+  interval_min="$(sanitize_uint "${1:-5}" 5 1 59)"
   local line
-  line="*/${interval_min} * * * * $SCRIPT_PATH --check # ${CRON_TAG}"
+  line="*/${interval_min} * * * * ${SCRIPT_PATH} --check # ${CRON_TAG}"
 
   local tmp
   tmp=$(mktemp)
-  crontab -l 2>/dev/null | grep -vF "$CRON_TAG" > "$tmp" || true
-  echo "$line" >> "$tmp"
-  crontab "$tmp"
+  # 保留日报行（# traffic-monitor-report），只替换检查任务行（# traffic-monitor）
+  crontab -l 2>/dev/null | awk -v tag="# ${CRON_TAG}" -v rtag="# ${CRON_TAG}-report" '
+    index($0, rtag) { print; next }
+    index($0, tag) { next }
+    { print }
+  ' > "$tmp" || true
+  printf '%s\n' "$line" >> "$tmp"
+  if ! crontab "$tmp"; then
+    rm -f "$tmp"
+    echo "$(c_red "✗") 安装 crontab 失败（请检查 cron 服务与权限）" >&2
+    echo "  调试行: ${line}" >&2
+    return 1
+  fi
   rm -f "$tmp"
   echo "$(c_green "✓") 已安装 crontab: 每 ${interval_min} 分钟检查一次"
   log INFO "安装 cron 每 ${interval_min} 分钟"
+  return 0
 }
 
 install_cron_report() {
@@ -3071,11 +3104,13 @@ prompt_input() {
   tput cnorm 2>/dev/null || true
   if [[ -n "$default" ]]; then
     read -r -p "$prompt [$default]: " var || true
-    echo "${var:-$default}"
+    var="${var:-$default}"
   else
     read -r -p "$prompt: " var || true
-    echo "$var"
   fi
+  # 去掉 Windows CR / 首尾空白，避免后续 (( ))、crontab 解析失败
+  var="$(printf '%s' "$var" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  printf '%s\n' "$var"
 }
 
 menu_config_basic() {
@@ -3185,6 +3220,8 @@ menu_schedule() {
     2)
       local m
       m=$(prompt_input "检查间隔(分钟)" "5")
+      # 再兜底一次，防止异常输入写入 crontab
+      m="$(sanitize_uint "$m" 5 1 59)"
       install_cron "$m"
       ;;
     3) install_cron_report ;;
